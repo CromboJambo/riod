@@ -7,7 +7,7 @@ name = "riod"
 version = "0.1.0"
 edition = "2021"
 description = "System resource supervisor — observes, classifies, authorizes, and coordinates existing processes without owning their lifecycle."
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

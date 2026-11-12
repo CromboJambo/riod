@@ -14,22 +14,22 @@ Per-machine daemon that observes resources, authorizes by purpose, and allocates
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  rIOd Daemon                     │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Observer │→ │ Idle     │→ │ Resource      │  │
-│  │ (poll)   │  │ Detector │  │ Broker        │  │
-│  └──────────┘  └──────────┘  └───────┬───────┘  │
-│                                      │          │
-│  ┌──────────┐  ┌──────────┐         │          │
-│  │ Ledger   │← │ Socket   │←────────┘          │
-│  │ (JSONL)  │  │ Server   │                     │
-│  └──────────┘  └──────────┘                     │
-│                                                  │
-│  Clients: crabjar, PESTI, herdr, any Rust app    │
-│  via Unix socket JSON-RPC or riod-client crate   │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────
+│                  rIOd Daemon                     
+│                                                  
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  
+│  │ Observer │→ │ Idle     │→ │ Resource      │  
+│  │ (poll)   │  │ Detector │  │ Broker        │  
+│  └──────────┘  └──────────┘  └───────┬───────┘  
+│                                      │         
+│  ┌──────────┐  ┌──────────┐          │         
+│  │ Ledger   │← │ Socket   │← ────────┘         
+│  │ (JSONL)  │  │ Server   │                    
+│  └──────────┘  └──────────┘                     
+│                                                 
+│  Clients: crabjar, PESTI, herdr, any Rust app   
+│  via Unix socket JSON-RPC or riod-client crate   
+└─────────────────────────────────────────────────
 ```
 
 ## Quick Start
@@ -157,8 +157,14 @@ riod-client/   Client library crate
 3. **Append-only ledger.** All events are immutable once written. Reconciliation over mutation.
 4. **Per-machine authority.** Each machine runs its own rIOd. Fleet coordination is a separate concern.
 
+## License
+
+AGPL-3.0-or-later — see [LICENSE](LICENSE).
+
+This is a network daemon with a client library. The AGPL copyleft applies to modifications of rIOd itself and any software that links against or communicates with the `riod-client` crate in a way that creates a combined work. Standalone clients that communicate over the JSON-RPC socket API are separate works (the "corresponding source" obligation is triggered by modification, not by network interaction alone — see AGPL Section 13).
+
 ## Related Projects
 
 - [crabjar](https://github.com/CromboJambo/crabjar) — Agent orchestration framework (rIOd's primary client)
 - PESTI — Portable execution substrate for transformer inference
-- herdr — Terminal multiplexer for agent-driven development
+

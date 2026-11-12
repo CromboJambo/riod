@@ -3,7 +3,7 @@ name = "riod-client"
 version = "0.1.0"
 edition = "2021"
 description = "Client library for the rIOd system resource supervisor. Communicates with the riod daemon over Unix socket JSON-RPC."
-license = "Apache-2.0"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "macros"] }
