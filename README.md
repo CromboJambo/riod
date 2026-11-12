@@ -248,6 +248,7 @@ src/           Daemon implementation
   api_broker.rs Broker API handlers
   policy.rs    Phase 2 policy engine (intent-based authorization)
   risk.rs      Risk scoring engine (0-100 across 4 weighted factors)
+  dream.rs     Phase 3 dream cycle scheduler (idle-triggered background cognition)
 
 riod-client/   Client library crate
   src/client.rs    Typed sync + async client API
@@ -259,6 +260,41 @@ examples/      Sample configuration files
   policies.toml    Phase 2 policy file example
 ```
 
+### Phase 3: Dream Scheduler
+
+| Method | Description |
+|--------|-------------|
+| `dream.status` | Query dream scheduler state machine, cycle count, and configuration. |
+
+## Phase 3: Dream Scheduler (Background Cognition)
+
+The dream scheduler monitors system idle state and triggers "dream cycles" after sustained inactivity. It does not execute dream tasks itself — it manages the trigger lifecycle and emits ledger events that downstream consumers (crabjar, etc.) can act on.
+
+### State machine
+
+```
+Idle → Armed → Triggered → Idle
+  ↑       ↓         ↓
+  └───────┴─────────┘ (activity resumes / cycle completes)
+```
+
+- **Idle**: System is active or dream mode is disabled.
+- **Armed**: System has been idle; counting toward the trigger threshold.
+- **Triggered**: Threshold reached; a dream cycle is in progress. Downstream consumers should begin background work.
+
+### Configuration (CLI flags)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dream-enabled` | `false` | Enable the dream scheduler |
+| `--dream-idle-threshold-mins` | `120` | Minutes of sustained idle before triggering |
+| `--dream-max-cycle-duration-mins` | `30` | Maximum duration of a single dream cycle |
+| `--dream-cooldown-mins` | `240` | Minimum minutes between consecutive dream cycles |
+
+### Ledger events
+
+Dream scheduler state changes are appended to the event ledger as `DreamEvent` entries with type: `armed`, `triggered`, `preempted`, or `completed`.
+
 ## Phases
 
 | Phase | Scope | Status |
@@ -268,7 +304,7 @@ examples/      Sample configuration files
 | — | Client library: typed sync/async Rust client crate | ✅ Complete |
 | 2 | Policy: purpose-based authorization, intent → allocation enforcement | ✅ Complete |
 | — | Risk scoring: 4-factor assessment, dry-run API, ledger audit trail | ✅ Complete |
-| 3 | Dreaming: background cognition on idle compute | Planned |
+| 3 | Dreaming: background cognition on idle compute | 🔄 In Progress (scheduler) |
 
 ## Design Principles
 

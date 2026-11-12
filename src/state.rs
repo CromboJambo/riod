@@ -4,6 +4,7 @@
 //! the observer loop, socket server, and background tasks via Arc<Mutex>.
 
 use crate::broker::ResourceBroker;
+use crate::dream::DreamScheduler;
 use crate::ledger::EventLedger;
 use crate::observe::IdleDetector;
 use crate::policy::PolicyEngine;
@@ -18,6 +19,8 @@ pub struct ServerState {
     pub broker: Mutex<ResourceBroker>,
     /// Policy engine for purpose-based authorization (Phase 2).
     pub policy_engine: Mutex<PolicyEngine>,
+    /// Dream cycle scheduler (Phase 3).
+    pub dream_scheduler: Mutex<DreamScheduler>,
     /// Daemon start time (for uptime reporting).
     pub started_at: DateTime<Utc>,
     /// Configuration snapshot for status reporting.

@@ -83,6 +83,9 @@ pub enum LedgerEvent {
         allocation_id: String,
         client_id: String,
     },
+
+    /// Dream scheduler state change (Phase 3).
+    DreamEvent { data: serde_json::Value },
 }
 
 impl LedgerEvent {

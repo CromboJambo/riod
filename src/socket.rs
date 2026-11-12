@@ -185,6 +185,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         "resources.risk_assess" => {
             handle_risk_assess(&id, request.params.unwrap_or(Value::Null), state).await
         },
+        // Phase 3: Dream scheduler methods
+        "dream.status" => handle_dream_status(&id, state).await,
         _ => error_response(
             &id,
             -32601,
@@ -195,7 +197,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "resources.allocate", "resources.release", "resources.heartbeat",
                     "resources.list", "resources.available", "resources.add_process",
                     "intent.declare", "intent.status", "policy.list", "policy.reload",
-                    "resources.risk_assess"
+                    "resources.risk_assess",
+                    "dream.status"
                 ]
             })),
         ),
@@ -524,6 +527,22 @@ async fn handle_risk_assess(id: &Option<Value>, params: Value, state: &Arc<Serve
     )
 }
 
+// ─── Phase 3: Dream Scheduler Handlers ──────────────────────────────
+
+/// Handle `dream.status` — query the dream scheduler state.
+async fn handle_dream_status(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    let scheduler = state.dream_scheduler.lock().unwrap();
+    let status = scheduler.state();
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": status,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,12 +573,17 @@ mod tests {
         }];
         let broker = ResourceBroker::new(gpus, 65536);
         let policy_engine = crate::policy::PolicyEngine::new();
+        let dream_scheduler = crate::dream::DreamScheduler::new(crate::dream::DreamConfig {
+            enabled: false,
+            ..Default::default()
+        });
 
         let state = Arc::new(ServerState {
             detector: Mutex::new(detector),
             ledger: Mutex::new(ledger),
             broker: Mutex::new(broker),
             policy_engine: Mutex::new(policy_engine),
+            dream_scheduler: Mutex::new(dream_scheduler),
             started_at: Utc::now(),
             poll_interval_s: 30,
         });

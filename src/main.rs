@@ -6,6 +6,7 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use riod::broker::ResourceBroker;
+use riod::dream::{DreamConfig, DreamScheduler};
 use riod::ledger::{EventLedger, LedgerConfig, LedgerEvent};
 use riod::observe::{IdleDetector, ObserveConfig};
 use riod::socket::{self};
@@ -61,6 +62,22 @@ enum Command {
         /// Path to TOML policy file for purpose-based authorization (Phase 2)
         #[arg(long)]
         policy_file: Option<PathBuf>,
+
+        /// Enable dream cycles on sustained idle (Phase 3, default: off)
+        #[arg(long)]
+        dream_enabled: bool,
+
+        /// Minimum sustained idle time before triggering a dream cycle in minutes (default: 120)
+        #[arg(long, default_value_t = 120)]
+        dream_idle_threshold_mins: u64,
+
+        /// Maximum duration for a single dream cycle in minutes (default: 30)
+        #[arg(long, default_value_t = 30)]
+        dream_max_cycle_duration_mins: u64,
+
+        /// Minimum interval between consecutive dream cycles in minutes (default: 240)
+        #[arg(long, default_value_t = 240)]
+        dream_cooldown_mins: u64,
     },
     /// Query the event ledger directly (no daemon required)
     Ledger {
@@ -100,6 +117,10 @@ struct DaemonConfig {
     cgroups_enabled: bool,
     socket_perm: u32,
     policy_file: Option<PathBuf>,
+    dream_enabled: bool,
+    dream_idle_threshold_mins: u64,
+    dream_max_cycle_duration_mins: u64,
+    dream_cooldown_mins: u64,
 }
 
 impl Default for DaemonConfig {
@@ -114,6 +135,10 @@ impl Default for DaemonConfig {
             cgroups_enabled: false,
             socket_perm: 0o777,
             policy_file: None,
+            dream_enabled: false,
+            dream_idle_threshold_mins: 120,
+            dream_max_cycle_duration_mins: 30,
+            dream_cooldown_mins: 240,
         }
     }
 }
@@ -143,6 +168,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cgroups,
             socket_perm,
             policy_file,
+            dream_enabled,
+            dream_idle_threshold_mins,
+            dream_max_cycle_duration_mins,
+            dream_cooldown_mins,
         }) => {
             let socket_perm = u32::from_str_radix(&socket_perm, 8).unwrap_or(0o777);
             let config = DaemonConfig {
@@ -155,6 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cgroups_enabled: cgroups,
                 socket_perm,
                 policy_file,
+                dream_enabled,
+                dream_idle_threshold_mins,
+                dream_max_cycle_duration_mins,
+                dream_cooldown_mins,
             };
             run_daemon(config).await
         }
@@ -251,6 +284,24 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
     let broker_mutex = std::sync::Mutex::new(broker);
     let policy_mutex = std::sync::Mutex::new(policy_engine);
 
+    // Initialize dream scheduler (Phase 3)
+    let dream_config = DreamConfig {
+        enabled: config.dream_enabled,
+        idle_threshold_mins: config.dream_idle_threshold_mins,
+        max_cycle_duration_mins: config.dream_max_cycle_duration_mins,
+        cooldown_mins: config.dream_cooldown_mins,
+    };
+    let dream_scheduler = DreamScheduler::new(dream_config);
+    let dream_mutex = std::sync::Mutex::new(dream_scheduler);
+    if config.dream_enabled {
+        tracing::info!(
+            threshold_mins = config.dream_idle_threshold_mins,
+            max_cycle_mins = config.dream_max_cycle_duration_mins,
+            cooldown_mins = config.dream_cooldown_mins,
+            "dream scheduler enabled"
+        );
+    }
+
     // Log daemon start event
     {
         let mut ledger = ledger_mutex.lock().unwrap();
@@ -268,6 +319,7 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         ledger: ledger_mutex,
         broker: broker_mutex,
         policy_engine: policy_mutex,
+        dream_scheduler: dream_mutex,
         started_at,
         poll_interval_s: config.poll_interval_s,
     });
@@ -389,6 +441,9 @@ async fn run_observer_loop(state: Arc<ServerState>, interval_s: u64) {
                     idle = is_idle,
                     "resource snapshot"
                 );
+
+                // Update dream scheduler (Phase 3)
+                update_dream_scheduler(&state).await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "resource polling failed");
@@ -434,6 +489,47 @@ async fn run_reclaim_loop(state: Arc<ServerState>) {
 
         if reclaimed > 0 {
             tracing::info!(count = reclaimed, "reclaimed stale allocations");
+        }
+    }
+}
+
+/// Update the dream scheduler with the current idle state.
+/// Called after each resource poll in the observer loop.
+async fn update_dream_scheduler(state: &Arc<ServerState>) {
+    // Get current idle state and idle_since from detector
+    let (is_idle, idle_since) = {
+        let detector = state.detector.lock().unwrap();
+        (detector.is_system_idle, detector.idle_since)
+    };
+
+    let now = Utc::now();
+
+    // Update dream scheduler (may produce an event)
+    let event = {
+        let mut scheduler = state.dream_scheduler.lock().unwrap();
+        scheduler.update(is_idle, idle_since, now)
+    };
+
+    // If the scheduler produced an event, log it to the ledger
+    if let Some(event) = event {
+        let data = serde_json::to_value(&event).unwrap_or_default();
+        let mut ledger = state.ledger.lock().unwrap();
+        match ledger.append(LedgerEvent::DreamEvent { data: data.clone() }) {
+            Ok(entry) => {
+                // Extract a short description for logging
+                let event_type = serde_json::to_value(&event)
+                    .ok()
+                    .and_then(|v| v.get("event").and_then(|e| e.as_str()).map(String::from))
+                    .unwrap_or_else(|| "unknown".to_string());
+                tracing::info!(
+                    event_id = %entry.id,
+                    dream_event = %event_type,
+                    "dream scheduler event"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to log dream event");
+            }
         }
     }
 }
