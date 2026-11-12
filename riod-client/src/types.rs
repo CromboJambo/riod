@@ -258,23 +258,71 @@ pub struct Intent {
     pub risk: Option<RiskScore>,
 }
 
+/// Per-GPU availability detail (why a GPU is or isn't available).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuAvailability {
+    pub index: u32,
+    pub name: String,
+    /// True if this GPU is allocatable right now.
+    pub available: bool,
+    /// Reason why unavailable (None if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Allocated by riod to this allocation ID (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub riod_allocation: Option<String>,
+    /// Free VRAM in MB.
+    pub free_vram_mb: u64,
+    /// Current utilization percentage.
+    pub utilization_percent: u8,
+}
+
+/// Thresholds used for availability calculations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvailabilityThresholds {
+    /// Minimum free VRAM (MB) a GPU must have to be considered available.
+    pub min_free_vram_mb: u64,
+    /// Maximum GPU utilization (%) for a GPU to be considered available.
+    pub max_gpu_utilization_percent: u8,
+    /// Minimum free RAM (MB) that must remain after all usage.
+    pub min_free_ram_mb: u64,
+}
+
 /// Current availability of resources on the system.
+///
+/// This is utilization-aware: a GPU is only reported as available if it's
+/// unallocated by riod AND has sufficient free VRAM and utilization headroom
+/// based on the latest system snapshot. RAM availability accounts for both
+/// system-wide usage and riod's own allocations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Availability {
-    /// GPU indices that are currently free.
+    /// GPU indices that are currently free (utilization-aware).
     pub available_gpus: Vec<u32>,
     /// Total number of GPUs on the system.
     pub total_gpus: usize,
-    /// Number of GPUs currently allocated.
+    /// Number of GPUs allocated by riod.
     pub allocated_gpus: usize,
     /// Total system RAM in MB.
     pub total_ram_mb: u64,
-    /// Currently allocated RAM in MB.
-    pub allocated_ram_mb: u64,
-    /// Available RAM in MB.
+    /// RAM currently in use by the system (all processes).
+    #[serde(default)]
+    pub system_used_ram_mb: u64,
+    /// RAM allocated through riod's broker.
+    #[serde(default)]
+    pub riod_allocated_ram_mb: u64,
+    /// Available RAM in MB (total - system used - riod allocated).
     pub available_ram_mb: u64,
     /// Number of active allocations.
     pub active_allocations: usize,
+    /// Whether this report is based on fresh data.
+    #[serde(default)]
+    pub data_fresh: bool,
+    /// Per-GPU availability details (why each GPU is/isn't available).
+    #[serde(default)]
+    pub gpu_details: Vec<GpuAvailability>,
+    /// Thresholds used for this calculation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<AvailabilityThresholds>,
 }
 
 /// Result of releasing an allocation.
