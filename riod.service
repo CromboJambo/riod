@@ -1,0 +1,31 @@
+# rIOd — System Resource Supervisor
+# Per-machine daemon: observes resources, authorizes by purpose, allocates GPU/CPU/RAM.
+# Coordinates but never owns lifecycle — dinit manages this process, rIOd manages resources.
+
+command /usr/local/bin/riod daemon \
+    --socket-path /run/riod.sock \
+    --ledger-path /var/log/riod/events.jsonl \
+    --poll-interval-s 30 \
+    --idle-cpu-percent 5 \
+    --idle-gpu-percent 10 \
+    --idle-sample-count 6
+
+# Create runtime directories
+template {
+    directory /run/riod
+}
+template {
+    directory /var/log/riod
+}
+
+# Logging
+stdout stream file /var/log/riod/riod.log
+stderr stream file /var/log/riod/riod.err.log
+
+# Restart policy: always restart on failure, with backoff
+restart condition any
+restart delay 5
+
+# Environment
+environment RUST_LOG=info
+environment PATH=/usr/local/bin:/usr/bin:/bin
