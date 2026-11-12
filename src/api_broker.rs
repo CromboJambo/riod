@@ -218,22 +218,43 @@ pub async fn handle_resources_list(id: &Option<Value>, state: &Arc<ServerState>)
 }
 
 /// Handle `resources.available` — show current available capacity.
+///
+/// Returns utilization-aware availability: a GPU is only reported as available
+/// if it's unallocated by riod AND has sufficient free VRAM and utilization
+/// headroom based on the latest system snapshot. RAM availability accounts for
+/// both system-wide usage and riod's own allocations.
 pub async fn handle_resources_available(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    // Get the latest resource snapshot from the observer (actual system usage).
+    // Clone it so we don't hold the detector lock while computing availability.
+    let snapshot = state.detector.lock().unwrap().latest_snapshot().cloned();
+
     let broker = state.broker.lock().unwrap();
-    let status = broker.status();
+
+    // Compute utilization-aware availability
+    let thresholds = crate::broker::AvailabilityThresholds::default();
+    let effective = broker.effective_availability(snapshot.as_ref(), &thresholds);
 
     success_response(
         id,
         json!({
             "success": true,
             "data": {
-                "available_gpus": broker.available_gpus(),
-                "total_gpus": status.total_gpus.len(),
-                "allocated_gpus": status.allocated_gpus.len(),
-                "total_ram_mb": status.total_ram_mb,
-                "allocated_ram_mb": status.allocated_ram_mb,
-                "available_ram_mb": status.total_ram_mb.saturating_sub(status.allocated_ram_mb),
-                "active_allocations": status.active_allocations,
+                // Utilization-aware view (what clients should use for scheduling)
+                "available_gpus": effective.available_gpus,
+                "total_gpus": effective.total_gpus,
+                "allocated_gpus": effective.riod_allocated_gpus.len(),
+                "available_ram_mb": effective.available_ram_mb,
+                "total_ram_mb": effective.total_ram_mb,
+                "system_used_ram_mb": effective.system_used_ram_mb,
+                "riod_allocated_ram_mb": effective.riod_allocated_ram_mb,
+                "active_allocations": effective.active_allocations,
+                "data_fresh": effective.data_fresh,
+
+                // Per-GPU details (why each GPU is/isn't available)
+                "gpu_details": effective.gpu_details,
+
+                // Thresholds used for this calculation (for transparency)
+                "thresholds": thresholds,
             },
         }),
     )

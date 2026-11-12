@@ -9,7 +9,7 @@
 
 use crate::cgroup::{CgroupError, CgroupManager};
 use crate::ledger::{EventLedger, LedgerEvent};
-use crate::observe::GpuInfo;
+use crate::observe::{GpuInfo, ResourceSnapshot};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -124,6 +124,76 @@ pub struct PoolStatus {
     pub allocated_ram_mb: u64,
     /// Number of active allocations.
     pub active_allocations: usize,
+}
+
+/// Thresholds for determining if a resource is "effectively available"
+/// considering both riod's own allocations and actual system utilization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvailabilityThresholds {
+    /// Minimum free VRAM (MB) a GPU must have to be considered available.
+    /// Default: 1024 MB (1 GB).
+    pub min_free_vram_mb: u64,
+    /// Maximum GPU utilization (%) for a GPU to be considered available.
+    /// Default: 80%.
+    pub max_gpu_utilization_percent: u8,
+    /// Minimum free RAM (MB) that must remain after accounting for both
+    /// system usage and riod allocations. Default: 2048 MB (2 GB).
+    pub min_free_ram_mb: u64,
+}
+
+impl Default for AvailabilityThresholds {
+    fn default() -> Self {
+        Self {
+            min_free_vram_mb: 1024,
+            max_gpu_utilization_percent: 80,
+            min_free_ram_mb: 2048,
+        }
+    }
+}
+
+/// Utilization-aware availability report. Combines riod's allocation ledger
+/// with actual system resource usage to give a true picture of what can be
+/// allocated without OOM or contention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveAvailability {
+    /// GPUs that are both unallocated by riod AND have sufficient free VRAM
+    /// and utilization headroom based on the latest system snapshot.
+    pub available_gpus: Vec<u32>,
+    /// Per-GPU availability details (why each GPU is or isn't available).
+    pub gpu_details: Vec<GpuAvailability>,
+    /// Total GPUs visible on this machine.
+    pub total_gpus: usize,
+    /// GPUs allocated by riod (regardless of actual utilization).
+    pub riod_allocated_gpus: Vec<u32>,
+    /// RAM available after accounting for BOTH system usage and riod allocations.
+    pub available_ram_mb: u64,
+    /// Total system RAM.
+    pub total_ram_mb: u64,
+    /// RAM currently in use by the system (all processes, from /proc/meminfo).
+    pub system_used_ram_mb: u64,
+    /// RAM allocated through riod's broker.
+    pub riod_allocated_ram_mb: u64,
+    /// Number of active allocations in riod's ledger.
+    pub active_allocations: usize,
+    /// Whether this report is based on fresh data (snapshot < 2x poll interval old).
+    pub data_fresh: bool,
+}
+
+/// Detailed availability status for a single GPU.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuAvailability {
+    pub index: u32,
+    pub name: String,
+    /// True if this GPU is allocatable right now.
+    pub available: bool,
+    /// Reason why unavailable (None if available).
+    pub reason: Option<String>,
+    /// Allocated by riod to this allocation ID (if any).
+    pub riod_allocation: Option<String>,
+    /// Free VRAM in MB (total - system used).
+    pub free_vram_mb: u64,
+    /// Current utilization percentage.
+    pub utilization_percent: u8,
 }
 
 /// The resource broker. Manages allocation state and enforces capacity limits.
@@ -456,6 +526,132 @@ impl ResourceBroker {
         }
     }
 
+    /// Compute utilization-aware availability by combining riod's allocation
+    /// ledger with the latest system resource snapshot.
+    ///
+    /// A GPU is "available" only if:
+    /// 1. It is not allocated by riod, AND
+    /// 2. It has at least `thresholds.min_free_vram_mb` free VRAM, AND
+    /// 3. Its utilization is below `thresholds.max_gpu_utilization_percent`
+    ///
+    /// RAM available = total - system_used - riod_allocated (with a floor
+    /// of `thresholds.min_free_ram_mb` that must remain unallocated).
+    ///
+    /// Returns `None` if no snapshot is provided (falls back to allocation-only view).
+    pub fn effective_availability(
+        &self,
+        snapshot: Option<&ResourceSnapshot>,
+        thresholds: &AvailabilityThresholds,
+    ) -> EffectiveAvailability {
+        let riod_allocated_gpus: Vec<u32> = self.gpu_to_allocation.keys().cloned().collect();
+        let riod_allocated_ram = self.allocated_ram();
+
+        // Compute per-GPU availability
+        let mut gpu_details = Vec::new();
+        let mut available_gpus = Vec::new();
+
+        for gpu in &self.gpus {
+            // Check if allocated by riod
+            if let Some(alloc_id) = self.gpu_to_allocation.get(&gpu.index) {
+                gpu_details.push(GpuAvailability {
+                    index: gpu.index,
+                    name: gpu.name.clone(),
+                    available: false,
+                    reason: Some(format!("allocated by riod ({})", alloc_id)),
+                    riod_allocation: Some(alloc_id.clone()),
+                    free_vram_mb: gpu.vram_total_mb.saturating_sub(gpu.vram_used_mb),
+                    utilization_percent: gpu.utilization_percent,
+                });
+                continue;
+            }
+
+            // Check actual utilization from snapshot (if available)
+            let snap_gpu = snapshot.and_then(|s| s.gpus.iter().find(|g| g.index == gpu.index));
+
+            let free_vram = match snap_gpu {
+                Some(sg) => sg.vram_total_mb.saturating_sub(sg.vram_used_mb),
+                None => gpu.vram_total_mb.saturating_sub(gpu.vram_used_mb),
+            };
+            let utilization = snap_gpu
+                .map(|sg| sg.utilization_percent)
+                .unwrap_or(gpu.utilization_percent);
+
+            // Check free VRAM threshold
+            if free_vram < thresholds.min_free_vram_mb {
+                gpu_details.push(GpuAvailability {
+                    index: gpu.index,
+                    name: gpu.name.clone(),
+                    available: false,
+                    reason: Some(format!(
+                        "insufficient free VRAM: {}MB < {}MB required",
+                        free_vram, thresholds.min_free_vram_mb
+                    )),
+                    riod_allocation: None,
+                    free_vram_mb: free_vram,
+                    utilization_percent: utilization,
+                });
+                continue;
+            }
+
+            // Check utilization threshold
+            if utilization >= thresholds.max_gpu_utilization_percent {
+                gpu_details.push(GpuAvailability {
+                    index: gpu.index,
+                    name: gpu.name.clone(),
+                    available: false,
+                    reason: Some(format!(
+                        "high utilization: {}% >= {}% threshold",
+                        utilization, thresholds.max_gpu_utilization_percent
+                    )),
+                    riod_allocation: None,
+                    free_vram_mb: free_vram,
+                    utilization_percent: utilization,
+                });
+                continue;
+            }
+
+            // GPU is available
+            gpu_details.push(GpuAvailability {
+                index: gpu.index,
+                name: gpu.name.clone(),
+                available: true,
+                reason: None,
+                riod_allocation: None,
+                free_vram_mb: free_vram,
+                utilization_percent: utilization,
+            });
+            available_gpus.push(gpu.index);
+        }
+
+        // Compute RAM availability: total - system_used - riod_allocated
+        let (system_used_ram, data_fresh) = match snapshot {
+            Some(s) => (s.ram_used_mb, true),
+            None => (0, false),
+        };
+
+        let available_ram = self
+            .total_ram_mb
+            .saturating_sub(system_used_ram)
+            .saturating_sub(riod_allocated_ram);
+
+        // If we don't have fresh data, be conservative and report 0 available RAM
+        // (better to under-report than over-allocate).
+        let effective_available_ram = if data_fresh { available_ram } else { 0 };
+
+        EffectiveAvailability {
+            available_gpus,
+            gpu_details,
+            total_gpus: self.gpus.len(),
+            riod_allocated_gpus,
+            available_ram_mb: effective_available_ram,
+            total_ram_mb: self.total_ram_mb,
+            system_used_ram_mb: system_used_ram,
+            riod_allocated_ram_mb: riod_allocated_ram,
+            active_allocations: self.allocations.len(),
+            data_fresh,
+        }
+    }
+
     /// List all active allocations.
     pub fn list_allocations(&self) -> Vec<&Allocation> {
         self.allocations.values().collect()
@@ -497,5 +693,175 @@ impl ResourceBroker {
                 .map_err(|e| BrokerError::CgroupError(e.to_string())),
             None => Err(BrokerError::CgroupNotEnabled),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observe::{GpuInfo, ResourceSnapshot};
+
+    fn test_gpu(index: u32, vram_total: u64, vram_used: u64, util: u8) -> GpuInfo {
+        GpuInfo {
+            index,
+            name: format!("Test GPU {}", index),
+            vram_total_mb: vram_total,
+            vram_used_mb: vram_used,
+            utilization_percent: util,
+        }
+    }
+
+    fn test_snapshot(gpus: Vec<GpuInfo>, ram_used_mb: u64) -> ResourceSnapshot {
+        ResourceSnapshot {
+            timestamp: Utc::now(),
+            cpu_usage_percent: 10.0,
+            ram_total_mb: 32768,
+            ram_used_mb,
+            gpus,
+        }
+    }
+
+    #[test]
+    fn test_effective_availability_no_snapshot() {
+        let gpus = vec![test_gpu(0, 16384, 512, 5)];
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let thresholds = AvailabilityThresholds::default();
+
+        let avail = broker.effective_availability(None, &thresholds);
+
+        // Without a snapshot, data_fresh is false and RAM is conservatively 0
+        assert!(!avail.data_fresh);
+        assert_eq!(avail.available_ram_mb, 0);
+        // GPU should still be available based on allocation-only check
+        assert_eq!(avail.available_gpus, vec![0]);
+    }
+
+    #[test]
+    fn test_effective_availability_gpu_high_utilization() {
+        let gpus = vec![test_gpu(0, 16384, 512, 95)]; // 95% utilized
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 95)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let avail = broker.effective_availability(Some(&snap), &thresholds);
+
+        // GPU should NOT be available due to high utilization (95% >= 80%)
+        assert!(avail.available_gpus.is_empty());
+        assert_eq!(avail.gpu_details[0].index, 0);
+        assert!(!avail.gpu_details[0].available);
+        assert!(avail.gpu_details[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("high utilization"));
+    }
+
+    #[test]
+    fn test_effective_availability_gpu_low_vram() {
+        let gpus = vec![test_gpu(0, 16384, 16000, 10)]; // Only 384MB free
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 16000, 10)], 8192);
+        let thresholds = AvailabilityThresholds {
+            min_free_vram_mb: 1024,
+            ..Default::default()
+        };
+
+        let avail = broker.effective_availability(Some(&snap), &thresholds);
+
+        // GPU should NOT be available due to low free VRAM (384MB < 1024MB)
+        assert!(avail.available_gpus.is_empty());
+        assert!(avail.gpu_details[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("insufficient free VRAM"));
+    }
+
+    #[test]
+    fn test_effective_availability_gpu_allocated_by_riod() {
+        let gpus = vec![test_gpu(0, 16384, 512, 5)];
+        let mut broker = ResourceBroker::new(gpus, 32768);
+
+        // Allocate GPU 0 through riod
+        let request = AllocationRequest {
+            client_id: "test-client".into(),
+            purpose: "testing".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(1024),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+        broker.allocate(&request, &mut ledger).unwrap();
+
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 5)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let avail = broker.effective_availability(Some(&snap), &thresholds);
+
+        // GPU should NOT be available because riod allocated it
+        assert!(avail.available_gpus.is_empty());
+        assert_eq!(avail.riod_allocated_gpus, vec![0]);
+        assert!(avail.gpu_details[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("allocated by riod"));
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_effective_availability_gpu_available() {
+        let gpus = vec![test_gpu(0, 16384, 512, 5)]; // Plenty of free VRAM, low util
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 5)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let avail = broker.effective_availability(Some(&snap), &thresholds);
+
+        // GPU should be available
+        assert_eq!(avail.available_gpus, vec![0]);
+        assert!(avail.gpu_details[0].available);
+        assert!(avail.gpu_details[0].reason.is_none());
+        assert!(avail.data_fresh);
+
+        // RAM: 32768 total - 8192 system used - 0 riod allocated = 24576
+        assert_eq!(avail.available_ram_mb, 24576);
+    }
+
+    #[test]
+    fn test_effective_availability_mixed_gpus() {
+        let gpus = vec![
+            test_gpu(0, 16384, 512, 5),    // Available
+            test_gpu(1, 16384, 16000, 95), // Busy (low VRAM + high util)
+            test_gpu(2, 16384, 512, 50),   // Available (moderate util)
+        ];
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(
+            vec![
+                test_gpu(0, 16384, 512, 5),
+                test_gpu(1, 16384, 16000, 95),
+                test_gpu(2, 16384, 512, 50),
+            ],
+            16384,
+        );
+        let thresholds = AvailabilityThresholds::default();
+
+        let avail = broker.effective_availability(Some(&snap), &thresholds);
+
+        // GPUs 0 and 2 should be available, GPU 1 should not
+        assert_eq!(avail.available_gpus, vec![0, 2]);
+        assert!(!avail.gpu_details[1].available);
     }
 }
