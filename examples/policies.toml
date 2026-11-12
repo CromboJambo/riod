@@ -1,0 +1,50 @@
+# rIOd Phase 2 Policy File (example)
+# Deploy to /etc/riod/policies.toml on ftw3
+# Load with: --policy-file /etc/riod/policies.toml
+# Reload at runtime: policy.reload JSON-RPC method
+
+# Allow training jobs when the system has been idle for 10+ minutes
+# and GPU utilization is low (under 20%).
+[policy.training-during-idle]
+purpose = "training"
+description = "Allow QLoRA/training workloads during sustained idle periods"
+conditions = [
+    { type = "idle_duration", min_secs = 600 },
+    { type = "gpu_utilization", max_percent = 20 },
+    { type = "vram_free", min_percent = 50 },
+]
+max_duration_s = 86400   # Max 24h per training run
+priority = 10
+
+# Allow inference requests anytime, but cap duration at 1 hour.
+# No conditions — inference is always welcome (it's the primary workload).
+[policy.inference-anytime]
+purpose = "inference"
+description = "Always allow inference; it's the primary purpose of this machine"
+conditions = []
+max_duration_s = 3600
+priority = 5
+
+# Allow background dreaming/cognition only during off-hours (22:00-06:00 UTC)
+# when the system is idle and CPU usage is low.
+[policy.dreaming-offhours]
+purpose = "dreaming"
+description = "Background cognition during quiet hours"
+conditions = [
+    { type = "hour_range", start = 22, end = 6 },
+    { type = "idle_duration", min_secs = 300 },
+    { type = "cpu_usage", max_percent = 10.0 },
+]
+max_duration_s = 7200   # Max 2h per dream cycle
+priority = 8
+
+# Allow maintenance tasks (updates, cleanup) when idle for 5+ minutes.
+[policy.maintenance-idle]
+purpose = "maintenance"
+description = "System maintenance during idle periods"
+conditions = [
+    { type = "idle_duration", min_secs = 300 },
+    { type = "ram_usage", max_percent = 80 },
+]
+max_duration_s = 1800   # Max 30h per maintenance window
+priority = 3

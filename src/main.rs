@@ -57,6 +57,10 @@ enum Command {
         /// Unix socket file permissions (octal, e.g. "777" or "660")
         #[arg(long, default_value = "777")]
         socket_perm: String,
+
+        /// Path to TOML policy file for purpose-based authorization (Phase 2)
+        #[arg(long)]
+        policy_file: Option<PathBuf>,
     },
     /// Query the event ledger directly (no daemon required)
     Ledger {
@@ -95,6 +99,7 @@ struct DaemonConfig {
     idle_sample_count: usize,
     cgroups_enabled: bool,
     socket_perm: u32,
+    policy_file: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -108,6 +113,7 @@ impl Default for DaemonConfig {
             idle_sample_count: 20,
             cgroups_enabled: false,
             socket_perm: 0o777,
+            policy_file: None,
         }
     }
 }
@@ -136,6 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_sample_count,
             cgroups,
             socket_perm,
+            policy_file,
         }) => {
             let socket_perm = u32::from_str_radix(&socket_perm, 8).unwrap_or(0o777);
             let config = DaemonConfig {
@@ -147,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 idle_sample_count,
                 cgroups_enabled: cgroups,
                 socket_perm,
+                policy_file,
             };
             run_daemon(config).await
         }
@@ -226,10 +234,22 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         tracing::info!("cgroup enforcement disabled (advisory mode)");
     }
 
+    // Initialize policy engine (Phase 2)
+    let mut policy_engine = riod::policy::PolicyEngine::new();
+    if let Some(ref policy_path) = config.policy_file {
+        match policy_engine.load_from_file(policy_path) {
+            Ok(count) => tracing::info!(path = %policy_path.display(), count, "policy file loaded"),
+            Err(e) => tracing::warn!(error = %e, path = %policy_path.display(), "failed to load policy file, running without policies"),
+        }
+    } else {
+        tracing::info!("no policy file specified, intent declarations will be denied (no matching policy)");
+    }
+
     // Wrap in mutexes for shared access between observer loop and socket server
     let detector_mutex = std::sync::Mutex::new(detector);
     let ledger_mutex = std::sync::Mutex::new(ledger);
     let broker_mutex = std::sync::Mutex::new(broker);
+    let policy_mutex = std::sync::Mutex::new(policy_engine);
 
     // Log daemon start event
     {
@@ -247,6 +267,7 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         detector: detector_mutex,
         ledger: ledger_mutex,
         broker: broker_mutex,
+        policy_engine: policy_mutex,
         started_at,
         poll_interval_s: config.poll_interval_s,
     });

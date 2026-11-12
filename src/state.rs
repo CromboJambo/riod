@@ -6,6 +6,7 @@
 use crate::broker::ResourceBroker;
 use crate::ledger::EventLedger;
 use crate::observe::IdleDetector;
+use crate::policy::PolicyEngine;
 use chrono::{DateTime, Utc};
 use std::sync::Mutex;
 
@@ -15,6 +16,8 @@ pub struct ServerState {
     pub ledger: Mutex<EventLedger>,
     /// Resource broker for allocation management (Phase 1).
     pub broker: Mutex<ResourceBroker>,
+    /// Policy engine for purpose-based authorization (Phase 2).
+    pub policy_engine: Mutex<PolicyEngine>,
     /// Daemon start time (for uptime reporting).
     pub started_at: DateTime<Utc>,
     /// Configuration snapshot for status reporting.

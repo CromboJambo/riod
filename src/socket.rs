@@ -169,6 +169,18 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         "resources.add_process" => {
             crate::api_broker::handle_resources_add_process(&id, request.params, state).await
         }
+        // Phase 2: Policy and intent methods
+        "intent.declare" => handle_intent_declare(
+            &id,
+            request.params.unwrap_or(Value::Null),
+            state,
+        )
+        .await,
+        "intent.status" => {
+            handle_intent_status(&id, request.params.unwrap_or(Value::Null), state).await
+        },
+        "policy.list" => handle_policy_list(&id, state).await,
+        "policy.reload" => handle_policy_reload(&id, state).await,
         _ => error_response(
             &id,
             -32601,
@@ -177,7 +189,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                 "available": [
                     "system.status", "ledger.query", "ledger.tail", "ledger.stats",
                     "resources.allocate", "resources.release", "resources.heartbeat",
-                    "resources.list", "resources.available", "resources.add_process"
+                    "resources.list", "resources.available", "resources.add_process",
+                    "intent.declare", "intent.status", "policy.list", "policy.reload"
                 ]
             })),
         ),
@@ -325,6 +338,146 @@ fn ledger_path_string(_state: &Arc<ServerState>) -> String {
 
 // Phase 1 resource broker handlers live in crate::api_broker
 
+// ─── Phase 2: Policy and Intent Handlers ──────────────────────────────
+
+/// Handle `intent.declare` — declare an intent to use resources for a purpose.
+///
+/// Params: { client_id, purpose, description?, estimated_duration_s?, metadata? }
+async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let client_id = match params.get("client_id").and_then(|v| v.as_str()) {
+        Some(c) => c.to_string(),
+        None => return error_response(id, -32602, "Missing required param: client_id", None),
+    };
+
+    let purpose_str = match params.get("purpose").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return error_response(id, -32602, "Missing required param: purpose", None),
+    };
+
+    // Parse purpose (tolerant — unknown purposes become Custom)
+    let purpose: crate::policy::Purpose = serde_json::from_value(json!(purpose_str))
+        .unwrap_or_else(|_| crate::policy::Purpose::Custom(purpose_str.clone()));
+
+    let description = params
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let estimated_duration_s = params
+        .get("estimated_duration_s")
+        .and_then(|v| v.as_u64());
+
+    let metadata = params.get("metadata").cloned().unwrap_or(json!({}));
+
+    // Get current snapshot for condition evaluation
+    let detector_guard = state.detector.lock().unwrap();
+    let latest_snapshot = match detector_guard.latest_snapshot() {
+        Some(s) => s,
+        None => {
+            drop(detector_guard);
+            return error_response(
+                id,
+                -32603,
+                "No resource snapshot available yet (daemon just started?)",
+                None,
+            );
+        }
+    };
+
+    // Evaluate intent against policies using the policy engine
+    let intent = {
+        let mut engine = state.policy_engine.lock().unwrap();
+        engine.evaluate_intent(
+            &client_id,
+            purpose.clone(),
+            description,
+            estimated_duration_s,
+            metadata.clone(),
+            &latest_snapshot,
+            &detector_guard,
+        )
+    };
+    drop(detector_guard);
+
+    // Log the intent decision to the ledger
+    {
+        let mut ledger = state.ledger.lock().unwrap();
+        let event_type = match &intent.status {
+            crate::policy::IntentStatus::Granted => "intent_granted",
+            crate::policy::IntentStatus::Denied(_) => "intent_denied",
+            _ => "intent_declared",
+        };
+        ledger.append(crate::ledger::LedgerEvent::Info {
+            message: format!("{}: {} ({})", event_type, intent.id, purpose),
+            data: Some(json!({
+                "intent_id": intent.id,
+                "client_id": client_id,
+                "purpose": purpose_str,
+                "status": &intent.status,
+                "policy_applied": intent.policy_applied,
+                "failed_conditions": intent.failed_conditions,
+            })),
+        });
+    }
+
+    success_response(id, json!({
+        "success": true,
+        "data": intent,
+    }))
+}
+
+/// Handle `intent.status` — check the status of a previously declared intent.
+///
+/// Params: { id }
+async fn handle_intent_status(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let intent_id = match params.get("id").and_then(|v| v.as_str()) {
+        Some(i) => i.to_string(),
+        None => return error_response(id, -32602, "Missing required param: id", None),
+    };
+
+    let engine = state.policy_engine.lock().unwrap();
+    match engine.get_intent(&intent_id) {
+        Some(intent) => success_response(id, json!({ "success": true, "data": intent })),
+        None => error_response(
+            id,
+            -32602,
+            "Intent not found",
+            Some(json!({ "id": intent_id })),
+        ),
+    }
+}
+
+/// Handle `policy.list` — list all loaded policies.
+async fn handle_policy_list(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    let engine = state.policy_engine.lock().unwrap();
+    let count = engine.policy_count();
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "policy_count": count,
+            },
+        }),
+    )
+}
+
+/// Handle `policy.reload` — reload policies from the configured file.
+async fn handle_policy_reload(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    let mut engine = state.policy_engine.lock().unwrap();
+    match engine.reload() {
+        Ok(count) => success_response(
+            id,
+            json!({
+                "success": true,
+                "data": { "reloaded_policies": count },
+            }),
+        ),
+        Err(e) => error_response(id, -32603, "Policy reload failed", Some(json!({ "error": e.to_string() }))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,11 +507,13 @@ mod tests {
             utilization_percent: 0,
         }];
         let broker = ResourceBroker::new(gpus, 65536);
+        let policy_engine = crate::policy::PolicyEngine::new();
 
         let state = Arc::new(ServerState {
             detector: Mutex::new(detector),
             ledger: Mutex::new(ledger),
             broker: Mutex::new(broker),
+            policy_engine: Mutex::new(policy_engine),
             started_at: Utc::now(),
             poll_interval_s: 30,
         });
