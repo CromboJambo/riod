@@ -53,6 +53,10 @@ enum Command {
         /// Enable cgroup v2 enforcement for allocations (advisory if not set)
         #[arg(long)]
         cgroups: bool,
+
+        /// Unix socket file permissions (octal, e.g. "777" or "660")
+        #[arg(long, default_value = "777")]
+        socket_perm: String,
     },
     /// Query the event ledger directly (no daemon required)
     Ledger {
@@ -90,6 +94,7 @@ struct DaemonConfig {
     idle_gpu_percent: u8,
     idle_sample_count: usize,
     cgroups_enabled: bool,
+    socket_perm: u32,
 }
 
 impl Default for DaemonConfig {
@@ -102,6 +107,7 @@ impl Default for DaemonConfig {
             idle_gpu_percent: 10,
             idle_sample_count: 20,
             cgroups_enabled: false,
+            socket_perm: 0o777,
         }
     }
 }
@@ -129,7 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             idle_gpu_percent,
             idle_sample_count,
             cgroups,
+            socket_perm,
         }) => {
+            let socket_perm = u32::from_str_radix(&socket_perm, 8).unwrap_or(0o777);
             let config = DaemonConfig {
                 socket_path,
                 ledger_path,
@@ -138,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 idle_gpu_percent,
                 idle_sample_count,
                 cgroups_enabled: cgroups,
+                socket_perm,
             };
             run_daemon(config).await
         }
@@ -258,8 +267,9 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
     // Spawn the socket server
     let socket_state = Arc::clone(&state);
     let socket_path_clone = config.socket_path.clone();
+    let socket_perm = config.socket_perm;
     let socket_handle = tokio::spawn(async move {
-        if let Err(e) = socket::serve(socket_path_clone, socket_state).await {
+        if let Err(e) = socket::serve(socket_path_clone, socket_perm, socket_state).await {
             tracing::error!(error = %e, "socket server failed");
         }
     });

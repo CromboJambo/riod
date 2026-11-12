@@ -61,7 +61,11 @@ pub fn error_response(id: &Option<Value>, code: i32, message: &str, data: Option
 }
 
 /// Start the Unix socket server. Blocks until the task is cancelled.
-pub async fn serve(socket_path: PathBuf, state: Arc<ServerState>) -> Result<(), SocketError> {
+pub async fn serve(
+    socket_path: PathBuf,
+    socket_perm: u32,
+    state: Arc<ServerState>,
+) -> Result<(), SocketError> {
     // Remove stale socket file if it exists
     let _ = std::fs::remove_file(&socket_path);
 
@@ -75,7 +79,14 @@ pub async fn serve(socket_path: PathBuf, state: Arc<ServerState>) -> Result<(), 
     let listener = UnixListener::bind(&socket_path)
         .map_err(|e| SocketError::BindFailed(socket_path.display().to_string(), e.to_string()))?;
 
-    tracing::info!(path = %socket_path.display(), "socket server listening");
+    // Apply requested permissions to the socket file
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(socket_perm);
+    if let Err(e) = std::fs::set_permissions(&socket_path, perms) {
+        tracing::warn!(error = %e, "failed to set socket permissions, using default");
+    }
+
+    tracing::info!(path = %socket_path.display(), perm = format_args!("{socket_perm:o}"), "socket server listening");
 
     loop {
         let (stream, _) = listener
