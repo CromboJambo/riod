@@ -87,6 +87,8 @@ pub struct DreamScheduler {
     last_cycle_end: Option<DateTime<Utc>>,
     /// Total number of dream cycles triggered (lifetime counter).
     cycles_triggered: u64,
+    /// Current active dream cycle ID (if any). Used for broker preemption.
+    current_cycle_id: Option<String>,
 }
 
 impl DreamScheduler {
@@ -96,6 +98,7 @@ impl DreamScheduler {
             state: DreamState::Idle,
             last_cycle_end: None,
             cycles_triggered: 0,
+            current_cycle_id: None,
         }
     }
 
@@ -117,6 +120,12 @@ impl DreamScheduler {
     /// Whether a dream cycle is currently active.
     pub fn is_dreaming(&self) -> bool {
         self.state.is_active()
+    }
+
+    /// Get the current active dream cycle ID, if any.
+    /// Used by the broker to tag allocations for preemption.
+    pub fn current_cycle_id(&self) -> Option<&str> {
+        self.current_cycle_id.as_deref()
     }
 
     /// Update scheduler state based on current system idle status.
@@ -229,7 +238,8 @@ impl DreamScheduler {
         if !system_idle {
             // Activity resumed during dream — preempt
             let duration_secs = (now - started_at).num_seconds();
-            tracing::info!(duration_secs, "dream cycle preempted by activity");
+            let cycle_id = self.current_cycle_id.take();
+            tracing::info!(duration_secs, ?cycle_id, "dream cycle preempted by activity");
             self.state = DreamState::Idle;
             self.last_cycle_end = Some(now);
             return Some(DreamEvent::Preempted {
@@ -237,6 +247,7 @@ impl DreamScheduler {
                 started_at,
                 duration_secs,
                 reason: "activity resumed".to_string(),
+                cycle_id,
             });
         }
 
@@ -244,7 +255,8 @@ impl DreamScheduler {
         let elapsed_mins = (now - started_at).num_minutes() as u64;
         if elapsed_mins >= max_duration_mins {
             let duration_secs = (now - started_at).num_seconds();
-            tracing::info!(duration_secs, "dream cycle completed (max duration)");
+            let cycle_id = self.current_cycle_id.take();
+            tracing::info!(duration_secs, ?cycle_id, "dream cycle completed (max duration)");
             self.state = DreamState::Idle;
             self.last_cycle_end = Some(now);
             return Some(DreamEvent::Completed {
@@ -252,6 +264,7 @@ impl DreamScheduler {
                 started_at,
                 duration_secs,
                 reason: "max duration reached".to_string(),
+                cycle_id,
             });
         }
 
@@ -261,11 +274,14 @@ impl DreamScheduler {
     fn trigger_dream_cycle(&mut self, now: DateTime<Utc>) -> Option<DreamEvent> {
         self.cycles_triggered += 1;
         let max_duration = self.config.max_cycle_duration_mins;
+        let cycle_id = format!("dream-cycle-{:08x}", self.cycles_triggered);
         tracing::info!(
             cycle = self.cycles_triggered,
+            cycle_id = %cycle_id,
             max_duration_mins = max_duration,
             "dream cycle triggered"
         );
+        self.current_cycle_id = Some(cycle_id.clone());
         self.state = DreamState::Triggered {
             started_at: now,
             max_duration_mins: max_duration,
@@ -274,6 +290,7 @@ impl DreamScheduler {
             at: now,
             cycle_number: self.cycles_triggered,
             max_duration_mins: max_duration,
+            cycle_id,
         })
     }
 
@@ -282,14 +299,16 @@ impl DreamScheduler {
         if let DreamState::Triggered { started_at, .. } = self.state.clone() {
             let now = Utc::now();
             let duration_secs = (now - started_at).num_seconds();
+            let cycle_id = self.current_cycle_id.take();
             self.state = DreamState::Idle;
             self.last_cycle_end = Some(now);
-            tracing::info!(reason, "dream cycle cancelled");
+            tracing::info!(reason, ?cycle_id, "dream cycle cancelled");
             return Some(DreamEvent::Preempted {
                 at: now,
                 started_at,
                 duration_secs,
                 reason: reason.to_string(),
+                cycle_id,
             });
         }
         None
@@ -322,6 +341,9 @@ pub enum DreamEvent {
         at: DateTime<Utc>,
         cycle_number: u64,
         max_duration_mins: u64,
+        /// Unique identifier for this dream cycle. Used by the broker to tag
+        /// allocations so they can be released on preemption/completion.
+        cycle_id: String,
     },
     /// Dream cycle completed (max duration reached).
     Completed {
@@ -329,6 +351,7 @@ pub enum DreamEvent {
         started_at: DateTime<Utc>,
         duration_secs: i64,
         reason: String,
+        cycle_id: Option<String>,
     },
     /// Dream cycle preempted (activity resumed or manual cancel).
     Preempted {
@@ -336,6 +359,7 @@ pub enum DreamEvent {
         started_at: DateTime<Utc>,
         duration_secs: i64,
         reason: String,
+        cycle_id: Option<String>,
     },
 }
 
@@ -425,9 +449,10 @@ mod tests {
         let event = scheduler.update(true, Some(idle_since), now);
         assert!(event.is_some());
         match event.unwrap() {
-            DreamEvent::Triggered { cycle_number, max_duration_mins, .. } => {
+            DreamEvent::Triggered { cycle_number, max_duration_mins, cycle_id, .. } => {
                 assert_eq!(cycle_number, 1);
                 assert_eq!(max_duration_mins, 5);
+                assert!(!cycle_id.is_empty());
             }
             _ => panic!("expected Triggered event"),
         }

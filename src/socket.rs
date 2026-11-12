@@ -187,6 +187,7 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         },
         // Phase 3: Dream scheduler methods
         "dream.status" => handle_dream_status(&id, state).await,
+        "dream.cancel" => handle_dream_cancel(&id, request.params.unwrap_or(Value::Null), state).await,
         _ => error_response(
             &id,
             -32601,
@@ -198,7 +199,7 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "resources.list", "resources.available", "resources.add_process",
                     "intent.declare", "intent.status", "policy.list", "policy.reload",
                     "resources.risk_assess",
-                    "dream.status"
+                    "dream.status", "dream.cancel"
                 ]
             })),
         ),
@@ -541,6 +542,85 @@ async fn handle_dream_status(id: &Option<Value>, state: &Arc<ServerState>) -> Va
             "data": status,
         }),
     )
+}
+
+/// Handle `dream.cancel` — manually cancel an active dream cycle.
+/// This triggers preemption: all allocations tagged with the cycle ID are released.
+///
+/// Params: { reason? } (optional reason string)
+async fn handle_dream_cancel(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let reason = params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual cancel via API")
+        .to_string();
+
+    // Cancel the dream cycle (may produce a Preempted event)
+    let event = {
+        let mut scheduler = state.dream_scheduler.lock().unwrap();
+        scheduler.cancel(&reason)
+    };
+
+    match event {
+        Some(event) => {
+            // Log the cancellation to the ledger
+            let data = serde_json::to_value(&event).unwrap_or_default();
+            let mut ledger = state.ledger.lock().unwrap();
+            if let Err(e) = ledger.append(crate::ledger::LedgerEvent::DreamEvent { data }) {
+                tracing::warn!(error = %e, "failed to log dream cancel event");
+            }
+
+            // Release all allocations tagged with this cycle ID
+            if let Some(cycle_id) = extract_cancel_cycle_id(&event) {
+                let reclaimed = {
+                    let mut broker = state.broker.lock().unwrap();
+                    let mut ledger = state.ledger.lock().unwrap();
+                    broker.reclaim_dream_cycle(&cycle_id, &mut ledger)
+                };
+                tracing::info!(cycle_id = %cycle_id, reclaimed, "released dream cycle allocations on cancel");
+
+                success_response(
+                    id,
+                    json!({
+                        "success": true,
+                        "data": {
+                            "cancelled": true,
+                            "reason": reason,
+                            "cycle_id": cycle_id,
+                            "allocations_released": reclaimed,
+                        },
+                    }),
+                )
+            } else {
+                success_response(
+                    id,
+                    json!({
+                        "success": true,
+                        "data": {
+                            "cancelled": true,
+                            "reason": reason,
+                            "allocations_released": 0,
+                        },
+                    }),
+                )
+            }
+        }
+        None => error_response(
+            id,
+            -32602,
+            "No active dream cycle to cancel",
+            Some(json!({ "message": "dream scheduler is not in Triggered state" })),
+        ),
+    }
+}
+
+/// Extract the cycle ID from a Preempted event (used by dream.cancel handler).
+fn extract_cancel_cycle_id(event: &crate::dream::DreamEvent) -> Option<String> {
+    use crate::dream::DreamEvent;
+    match event {
+        DreamEvent::Preempted { cycle_id, .. } => cycle_id.clone(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

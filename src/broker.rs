@@ -72,6 +72,10 @@ pub struct AllocationRequest {
     /// The intent is marked Consumed on successful allocation.
     #[serde(default)]
     pub intent_id: Option<String>,
+    /// Optional dream cycle ID. When a dream cycle is preempted or completed,
+    /// all allocations tagged with this cycle ID are automatically released.
+    #[serde(default)]
+    pub dream_cycle_id: Option<String>,
 }
 
 fn default_ttl() -> u64 {
@@ -102,6 +106,9 @@ pub struct Allocation {
     /// Cgroup path for resource enforcement (set when cgroup mode is enabled).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cgroup_path: Option<String>,
+    /// Dream cycle ID if this allocation was made during a dream cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dream_cycle_id: Option<String>,
 }
 
 /// Current state of the resource pool and active allocations.
@@ -263,6 +270,7 @@ impl ResourceBroker {
             expires_at: now + chrono::Duration::seconds(request.ttl_secs as i64),
             last_heartbeat: now,
             cgroup_path: None,
+            dream_cycle_id: request.dream_cycle_id.clone(),
         };
 
         // Create cgroup for enforcement (if enabled)
@@ -410,6 +418,26 @@ impl ResourceBroker {
 
         let mut count = 0;
         for id in expired {
+            if self.force_release(&id, ledger).is_ok() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Release all allocations tagged with a dream cycle ID.
+    /// Called when a dream cycle is preempted or completed to ensure clean teardown.
+    /// Returns the number of allocations reclaimed.
+    pub fn reclaim_dream_cycle(&mut self, cycle_id: &str, ledger: &mut EventLedger) -> usize {
+        let cycle_allocations: Vec<String> = self
+            .allocations
+            .iter()
+            .filter(|(_, a)| a.dream_cycle_id.as_deref() == Some(cycle_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut count = 0;
+        for id in cycle_allocations {
             if self.force_release(&id, ledger).is_ok() {
                 count += 1;
             }

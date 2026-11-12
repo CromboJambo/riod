@@ -48,6 +48,7 @@ fn test_allocate_specific_gpu() {
         ram_mb: Some(8192),
         ttl_secs: 600,
         intent_id: None,
+        dream_cycle_id: None,
     };
 
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
@@ -70,6 +71,7 @@ fn test_allocate_auto_assign() {
         ram_mb: None,
         ttl_secs: 300,
         intent_id: None,
+        dream_cycle_id: None,
     };
 
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
@@ -91,6 +93,7 @@ fn test_allocate_insufficient_gpus() {
         ram_mb: None,
         ttl_secs: 300,
         intent_id: None,
+        dream_cycle_id: None,
     };
     broker.allocate(&req1, &mut ledger).unwrap();
 
@@ -104,6 +107,7 @@ fn test_allocate_insufficient_gpus() {
         ram_mb: None,
         ttl_secs: 300,
         intent_id: None,
+        dream_cycle_id: None,
     };
     let err = broker.allocate(&req2, &mut ledger).unwrap_err();
     assert!(matches!(err, BrokerError::InsufficientResources(_)));
@@ -122,6 +126,7 @@ fn test_release_by_owner() {
         ram_mb: None,
         ttl_secs: 300,
         intent_id: None,
+        dream_cycle_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
 
@@ -144,6 +149,7 @@ fn test_release_by_non_owner_fails() {
         ram_mb: None,
         ttl_secs: 300,
         intent_id: None,
+        dream_cycle_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
 
@@ -167,6 +173,7 @@ fn test_heartbeat_extends_ttl() {
         ram_mb: None,
         ttl_secs: 10,
         intent_id: None,
+        dream_cycle_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
     let original_expiry = alloc.expires_at;
@@ -191,6 +198,7 @@ fn test_reclaim_expired() {
         ram_mb: None,
         ttl_secs: 1,
         intent_id: None,
+        dream_cycle_id: None,
     };
     broker.allocate(&request, &mut ledger).unwrap();
     assert_eq!(broker.allocations.len(), 1);
@@ -202,4 +210,49 @@ fn test_reclaim_expired() {
     let reclaimed = broker.reclaim_expired(&mut ledger);
     assert_eq!(reclaimed, 1);
     assert_eq!(broker.allocations.len(), 0);
+}
+
+#[test]
+fn test_reclaim_dream_cycle() {
+    let (mut broker, mut ledger, _dir) = test_broker();
+
+    // Allocate one GPU with a dream cycle ID
+    let req1 = AllocationRequest {
+        client_id: "dream-task-1".into(),
+        purpose: "dreaming".into(),
+        gpus: Some(vec![0]),
+        gpu_count: None,
+        cpu_percent: None,
+        ram_mb: None,
+        ttl_secs: 300,
+        intent_id: None,
+        dream_cycle_id: Some("dream-cycle-00000001".into()),
+    };
+    broker.allocate(&req1, &mut ledger).unwrap();
+
+    // Allocate one GPU without a dream cycle ID (should not be reclaimed)
+    let req2 = AllocationRequest {
+        client_id: "regular-task".into(),
+        purpose: "inference".into(),
+        gpus: Some(vec![1]),
+        gpu_count: None,
+        cpu_percent: None,
+        ram_mb: None,
+        ttl_secs: 300,
+        intent_id: None,
+        dream_cycle_id: None,
+    };
+    broker.allocate(&req2, &mut ledger).unwrap();
+
+    assert_eq!(broker.allocations.len(), 2);
+
+    // Reclaim the dream cycle — should only free the dream allocation
+    let reclaimed = broker.reclaim_dream_cycle("dream-cycle-00000001", &mut ledger);
+    assert_eq!(reclaimed, 1);
+    assert_eq!(broker.allocations.len(), 1);
+
+    // The regular task's GPU should still be allocated
+    assert!(!broker.available_gpus().contains(&1));
+    // The dream task's GPU should be freed
+    assert!(broker.available_gpus().contains(&0));
 }

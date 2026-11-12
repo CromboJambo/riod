@@ -531,5 +531,34 @@ async fn update_dream_scheduler(state: &Arc<ServerState>) {
                 tracing::warn!(error = %e, "failed to log dream event");
             }
         }
+
+        // Handle preemption: when a dream cycle ends (preempted or completed),
+        // release all allocations tagged with that cycle ID.
+        if let Some(cycle_id) = extract_cycle_id(&event) {
+            let reclaimed = {
+                let mut broker = state.broker.lock().unwrap();
+                let mut ledger = state.ledger.lock().unwrap();
+                broker.reclaim_dream_cycle(&cycle_id, &mut ledger)
+            };
+            if reclaimed > 0 {
+                tracing::info!(
+                    cycle_id = %cycle_id,
+                    reclaimed,
+                    "released dream cycle allocations"
+                );
+            }
+        }
+    }
+}
+
+/// Extract the cycle ID from a dream event that signals the end of a cycle.
+/// Returns Some(cycle_id) for Preempted/Completed events, None otherwise.
+fn extract_cycle_id(event: &riod::dream::DreamEvent) -> Option<String> {
+    use riod::dream::DreamEvent;
+    match event {
+        DreamEvent::Completed { cycle_id, .. } | DreamEvent::Preempted { cycle_id, .. } => {
+            cycle_id.clone()
+        }
+        _ => None,
     }
 }

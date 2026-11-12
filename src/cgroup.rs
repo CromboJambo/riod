@@ -185,6 +185,7 @@ mod tests {
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
             last_heartbeat: chrono::Utc::now(),
             cgroup_path: None,
+            dream_cycle_id: None,
         };
         let req = AllocationRequest {
             client_id: "client".into(),
@@ -195,6 +196,7 @@ mod tests {
             ram_mb: Some(1024),
             ttl_secs: 60,
             intent_id: None,
+            dream_cycle_id: None,
         };
 
         assert!(matches!(
