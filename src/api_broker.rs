@@ -22,31 +22,76 @@ pub async fn handle_resources_allocate(
                 -32602,
                 "Invalid params",
                 Some(json!({
-                    "expected": "AllocationRequest object with client_id, purpose, and optionally gpus/gpu_count/cpu_percent/ram_mb/ttl_secs"
+                    "expected": "AllocationRequest object with client_id, purpose, and optionally gpus/gpu_count/cpu_percent/ram_mb/ttl_secs/intent_id"
                 })),
             );
         }
     };
 
+    // Verify intent if provided (Phase 2 policy enforcement)
+    if let Some(intent_id) = &request.intent_id {
+        let policy_engine = state.policy_engine.lock().unwrap();
+        match policy_engine.verify_intent_for_allocation(intent_id, &request.client_id) {
+            Ok(policy_name) => {
+                tracing::info!(
+                    intent_id,
+                    client_id = %request.client_id,
+                    policy = %policy_name,
+                    "allocation authorized via intent"
+                );
+            }
+            Err(e) => {
+                return error_response(
+                    id,
+                    -32001,
+                    "Intent verification failed",
+                    Some(json!({
+                        "intent_id": intent_id,
+                        "error": e.to_string(),
+                    })),
+                );
+            }
+        }
+    } else if state.policy_engine.lock().unwrap().policy_count() > 0 {
+        // Policies are loaded but no intent provided — allow for backward compatibility
+        // but log a warning so operators know enforcement is partial.
+        tracing::warn!(
+            client_id = %request.client_id,
+            purpose = %request.purpose,
+            "allocation without intent_id while policies are loaded (partial enforcement)"
+        );
+    }
+
     let mut broker = state.broker.lock().unwrap();
     let mut ledger = state.ledger.lock().unwrap();
 
     match broker.allocate(&request, &mut ledger) {
-        Ok(alloc) => success_response(
-            id,
-            json!({
-                "success": true,
-                "data": {
-                    "allocation": alloc,
-                    "message": format!(
-                        "Allocated {} GPU(s) to {} for '{}'",
-                        alloc.gpus.len(),
-                        alloc.client_id,
-                        alloc.purpose
-                    ),
-                },
-            }),
-        ),
+        Ok(alloc) => {
+            // Consume the intent if one was used (one-shot authorization)
+            if let Some(intent_id) = &request.intent_id {
+                let mut policy_engine = state.policy_engine.lock().unwrap();
+                if let Err(e) = policy_engine.consume_intent(intent_id) {
+                    tracing::warn!(intent_id, error = %e, "failed to mark intent as consumed");
+                }
+            }
+
+            success_response(
+                id,
+                json!({
+                    "success": true,
+                    "data": {
+                        "allocation": alloc,
+                        "intent_id": request.intent_id,
+                        "message": format!(
+                            "Allocated {} GPU(s) to {} for '{}'",
+                            alloc.gpus.len(),
+                            alloc.client_id,
+                            alloc.purpose
+                        ),
+                    },
+                }),
+            )
+        }
         Err(e) => error_response(
             id,
             -32000,

@@ -194,6 +194,7 @@ mod tests {
             cpu_percent: Some(50.0),
             ram_mb: Some(1024),
             ttl_secs: 60,
+            intent_id: None,
         };
 
         assert!(matches!(

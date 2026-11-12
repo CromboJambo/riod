@@ -67,6 +67,11 @@ pub struct AllocationRequest {
     /// allocation is automatically released. Defaults to 300s (5 minutes).
     #[serde(default = "default_ttl")]
     pub ttl_secs: u64,
+    /// Optional intent ID from `intent.declare`. When provided and policies are
+    /// loaded, the intent must be Granted and not expired for allocation to proceed.
+    /// The intent is marked Consumed on successful allocation.
+    #[serde(default)]
+    pub intent_id: Option<String>,
 }
 
 fn default_ttl() -> u64 {

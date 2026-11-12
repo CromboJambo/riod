@@ -47,6 +47,7 @@ fn test_allocate_specific_gpu() {
         cpu_percent: Some(50.0),
         ram_mb: Some(8192),
         ttl_secs: 600,
+        intent_id: None,
     };
 
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
@@ -68,6 +69,7 @@ fn test_allocate_auto_assign() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 300,
+        intent_id: None,
     };
 
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
@@ -88,6 +90,7 @@ fn test_allocate_insufficient_gpus() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 300,
+        intent_id: None,
     };
     broker.allocate(&req1, &mut ledger).unwrap();
 
@@ -100,6 +103,7 @@ fn test_allocate_insufficient_gpus() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 300,
+        intent_id: None,
     };
     let err = broker.allocate(&req2, &mut ledger).unwrap_err();
     assert!(matches!(err, BrokerError::InsufficientResources(_)));
@@ -117,6 +121,7 @@ fn test_release_by_owner() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 300,
+        intent_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
 
@@ -138,6 +143,7 @@ fn test_release_by_non_owner_fails() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 300,
+        intent_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
 
@@ -160,6 +166,7 @@ fn test_heartbeat_extends_ttl() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 10,
+        intent_id: None,
     };
     let alloc = broker.allocate(&request, &mut ledger).unwrap();
     let original_expiry = alloc.expires_at;
@@ -183,6 +190,7 @@ fn test_reclaim_expired() {
         cpu_percent: None,
         ram_mb: None,
         ttl_secs: 1,
+        intent_id: None,
     };
     broker.allocate(&request, &mut ledger).unwrap();
     assert_eq!(broker.allocations.len(), 1);

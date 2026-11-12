@@ -445,6 +445,45 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// Verify an intent is valid for allocation: exists, granted, not expired, client matches.
+    /// Returns the policy name if valid.
+    pub fn verify_intent_for_allocation(&self, id: &str, client_id: &str) -> Result<String, PolicyError> {
+        let intent = self
+            .intents
+            .get(id)
+            .ok_or(PolicyError::IntentNotFound(id.to_string()))?;
+
+        if intent.client_id != client_id {
+            return Err(PolicyError::Denied {
+                policy: intent.policy_applied.clone().unwrap_or_default(),
+                reason: format!(
+                    "intent belongs to client '{}', not '{}'",
+                    intent.client_id, client_id
+                ),
+            });
+        }
+
+        if intent.status != IntentStatus::Granted {
+            return Err(PolicyError::Denied {
+                policy: intent.policy_applied.clone().unwrap_or_default(),
+                reason: format!("intent status is {:?}, not Granted", intent.status),
+            });
+        }
+
+        // Check expiry: granted intents are valid for 5 minutes
+        if let Some(granted_at) = intent.granted_at {
+            let age_secs = (Utc::now() - granted_at).num_seconds();
+            if age_secs > 300 {
+                return Err(PolicyError::Denied {
+                    policy: intent.policy_applied.clone().unwrap_or_default(),
+                    reason: format!("intent expired (granted {}s ago, max 300s)", age_secs),
+                });
+            }
+        }
+
+        Ok(intent.policy_applied.clone().unwrap_or_default())
+    }
+
     /// List all intents (for debugging/monitoring).
     pub fn list_intents(&self) -> Vec<&Intent> {
         let mut intents: Vec<&Intent> = self.intents.values().collect();
@@ -735,5 +774,132 @@ max_duration_s = 3600
         );
 
         assert!(matches!(intent.status, IntentStatus::Denied(_)));
+    }
+
+    #[test]
+    fn test_verify_intent_valid() {
+        let mut engine = PolicyEngine::new();
+        let toml = r#"
+[policy.allow-inference]
+purpose = "inference"
+conditions = []
+"#;
+        engine.policies = PolicyEngine::parse_toml(toml).unwrap();
+
+        let snap = test_snapshot();
+        let det = test_detector_idle();
+
+        let intent = engine.evaluate_intent(
+            "client-a",
+            Purpose::Inference,
+            "Test".into(),
+            None,
+            serde_json::json!({}),
+            &snap,
+            &det,
+        );
+        assert!(matches!(intent.status, IntentStatus::Granted));
+
+        // Verify with correct client
+        let policy = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap();
+        assert_eq!(policy, "allow-inference");
+    }
+
+    #[test]
+    fn test_verify_intent_wrong_client() {
+        let mut engine = PolicyEngine::new();
+        let toml = r#"
+[policy.allow-inference]
+purpose = "inference"
+conditions = []
+"#;
+        engine.policies = PolicyEngine::parse_toml(toml).unwrap();
+
+        let snap = test_snapshot();
+        let det = test_detector_idle();
+
+        let intent = engine.evaluate_intent(
+            "client-a",
+            Purpose::Inference,
+            "Test".into(),
+            None,
+            serde_json::json!({}),
+            &snap,
+            &det,
+        );
+
+        // Wrong client should fail
+        let err = engine.verify_intent_for_allocation(&intent.id, "client-b").unwrap_err();
+        assert!(err.to_string().contains("belongs to client"));
+    }
+
+    #[test]
+    fn test_verify_intent_consumed() {
+        let mut engine = PolicyEngine::new();
+        let toml = r#"
+[policy.allow-inference]
+purpose = "inference"
+conditions = []
+"#;
+        engine.policies = PolicyEngine::parse_toml(toml).unwrap();
+
+        let snap = test_snapshot();
+        let det = test_detector_idle();
+
+        let intent = engine.evaluate_intent(
+            "client-a",
+            Purpose::Inference,
+            "Test".into(),
+            None,
+            serde_json::json!({}),
+            &snap,
+            &det,
+        );
+
+        // Consume it first
+        engine.consume_intent(&intent.id).unwrap();
+
+        // Now verification should fail
+        let err = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap_err();
+        assert!(err.to_string().contains("Consumed"));
+    }
+
+    #[test]
+    fn test_verify_intent_not_found() {
+        let engine = PolicyEngine::new();
+        let err = engine.verify_intent_for_allocation("int-nonexistent", "client-a").unwrap_err();
+        assert!(matches!(err, PolicyError::IntentNotFound(_)));
+    }
+
+    #[test]
+    fn test_verify_intent_expired() {
+        let mut engine = PolicyEngine::new();
+        let toml = r#"
+[policy.allow-inference]
+purpose = "inference"
+conditions = []
+"#;
+        engine.policies = PolicyEngine::parse_toml(toml).unwrap();
+
+        let snap = test_snapshot();
+        let det = test_detector_idle();
+
+        let intent = engine.evaluate_intent(
+            "client-a",
+            Purpose::Inference,
+            "Test".into(),
+            None,
+            serde_json::json!({}),
+            &snap,
+            &det,
+        );
+
+        // Manually backdate the granted_at to simulate expiry
+        let expired_time = Utc::now() - chrono::Duration::seconds(400);
+        engine.intents.get_mut(&intent.id).unwrap().granted_at = Some(expired_time);
+
+        // Should now be expired (300s limit)
+        let err = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap_err();
+        assert!(err.to_string().contains("expired"));
     }
 }
