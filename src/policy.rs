@@ -5,6 +5,7 @@
 //! grants/denies based on current system state + policy conditions.
 
 use crate::observe::{IdleDetector, ResourceSnapshot};
+use crate::risk::{RiskAssessor, RiskScore};
 use chrono::{DateTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -190,6 +191,9 @@ pub struct Intent {
     /// Which conditions failed (if denied).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_conditions: Option<Vec<String>>,
+    /// Risk assessment computed at declaration time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskScore>,
 }
 
 /// Policy store: holds loaded policies and declared intents.
@@ -197,6 +201,7 @@ pub struct PolicyEngine {
     policies: Vec<(String, Policy)>, // (name, policy)
     intents: HashMap<String, Intent>,
     policy_path: Option<PathBuf>,
+    risk_assessor: RiskAssessor,
 }
 
 impl PolicyEngine {
@@ -206,6 +211,7 @@ impl PolicyEngine {
             policies: Vec::new(),
             intents: HashMap::new(),
             policy_path: None,
+            risk_assessor: RiskAssessor::new(),
         }
     }
 
@@ -288,9 +294,16 @@ impl PolicyEngine {
         self.policies.len()
     }
 
+    /// Assess risk for a resource request without declaring an intent.
+    /// Used by the `resources.risk_assess` API for dry-run evaluation.
+    pub fn assess_risk(&self, input: &crate::risk::RiskInput, snapshot: &ResourceSnapshot) -> RiskScore {
+        self.risk_assessor.assess(input, snapshot)
+    }
+
     /// Evaluate an intent declaration against loaded policies.
     ///
-    /// Returns the updated Intent with status set to Granted or Denied.
+    /// Returns the updated Intent with status set to Granted or Denied,
+    /// along with a risk assessment of the request.
     pub fn evaluate_intent(
         &mut self,
         client_id: &str,
@@ -302,6 +315,22 @@ impl PolicyEngine {
         detector: &IdleDetector,
     ) -> Intent {
         let intent_id = format!("int-{}", uuid::Uuid::new_v4().as_simple());
+
+        // Compute risk score before policy evaluation.
+        // Extract resource estimates from metadata if provided by the client.
+        let gpu_count = metadata.get("gpu_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let ram_mb = metadata.get("ram_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+        let cpu_percent = metadata.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let ttl_secs = estimated_duration_s.unwrap_or(300);
+
+        let risk_input = crate::risk::RiskInput {
+            gpu_count,
+            ram_mb,
+            cpu_percent,
+            ttl_secs,
+            purpose: purpose.clone(),
+        };
+        let risk_score = self.risk_assessor.assess(&risk_input, snapshot);
 
         // Find all policies matching this purpose, sorted by priority (already sorted)
         let matching: Vec<&(String, Policy)> = self
@@ -323,6 +352,7 @@ impl PolicyEngine {
                 policy_applied: None,
                 granted_at: None,
                 failed_conditions: None,
+                risk: Some(risk_score),
             };
         }
 
@@ -363,6 +393,7 @@ impl PolicyEngine {
                     policy_applied: Some(policy_name.clone()),
                     granted_at: Some(Utc::now()),
                     failed_conditions: None,
+                    risk: Some(risk_score),
                 };
                 self.intents.insert(intent_id.clone(), intent.clone());
                 tracing::info!(
@@ -370,6 +401,8 @@ impl PolicyEngine {
                     client_id,
                     purpose = %purpose,
                     policy = policy_name,
+                    risk_score = intent.risk.as_ref().map(|r| r.total),
+                    risk_level = intent.risk.as_ref().map(|r| r.level.to_string()),
                     "intent granted"
                 );
                 return intent;
@@ -410,6 +443,7 @@ impl PolicyEngine {
             } else {
                 Some(failed)
             },
+            risk: Some(risk_score),
         };
         self.intents.insert(intent_id.clone(), intent.clone());
         tracing::info!(

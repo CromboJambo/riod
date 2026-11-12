@@ -123,6 +123,113 @@ pub struct Allocation {
     pub cgroup_path: Option<String>,
 }
 
+/// Risk level classification for resource requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    /// Low risk (score 0-30): auto-grant with standard conditions.
+    Low,
+    /// Medium risk (score 31-60): stricter conditions, shorter TTLs.
+    Medium,
+    /// High risk (score 61-80): requires justification or human approval.
+    High,
+    /// Critical risk (score 81-100): deny unless explicit override.
+    Critical,
+}
+
+impl std::fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+/// A single risk factor contributing to the overall score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskFactor {
+    /// Factor name (e.g., "resource_intensity", "duration").
+    pub name: String,
+    /// Points contributed by this factor (0-100).
+    pub points: u8,
+    /// Human-readable explanation.
+    pub detail: String,
+}
+
+/// Composite risk score for a resource request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskScore {
+    /// Overall risk score (0-100). Higher = riskier.
+    pub total: u8,
+    /// Classified risk level based on the score.
+    pub level: RiskLevel,
+    /// Individual factor contributions.
+    pub factors: Vec<RiskFactor>,
+}
+
+/// Input for a dry-run risk assessment (`resources.risk_assess`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskInput {
+    /// Number of GPUs requested.
+    #[serde(default)]
+    pub gpu_count: usize,
+    /// RAM in MB requested.
+    #[serde(default)]
+    pub ram_mb: u64,
+    /// CPU percentage requested (0-100).
+    #[serde(default)]
+    pub cpu_percent: f32,
+    /// Requested TTL in seconds.
+    #[serde(default = "default_ttl")]
+    pub ttl_secs: u64,
+    /// Purpose of the allocation.
+    pub purpose: String,
+}
+
+fn default_ttl() -> u64 {
+    300
+}
+
+impl RiskInput {
+    /// Create a new risk assessment input.
+    pub fn new(purpose: impl Into<String>) -> Self {
+        Self {
+            gpu_count: 0,
+            ram_mb: 0,
+            cpu_percent: 0.0,
+            ttl_secs: 300,
+            purpose: purpose.into(),
+        }
+    }
+
+    /// Set number of GPUs.
+    pub fn with_gpu_count(mut self, count: usize) -> Self {
+        self.gpu_count = count;
+        self
+    }
+
+    /// Set RAM in MB.
+    pub fn with_ram_mb(mut self, mb: u64) -> Self {
+        self.ram_mb = mb;
+        self
+    }
+
+    /// Set CPU percentage.
+    pub fn with_cpu_percent(mut self, percent: f32) -> Self {
+        self.cpu_percent = percent;
+        self
+    }
+
+    /// Set TTL in seconds.
+    pub fn with_ttl(mut self, secs: u64) -> Self {
+        self.ttl_secs = secs;
+        self
+    }
+}
+
 /// A declared intent for resource allocation (Phase 2 policy engine).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
@@ -146,6 +253,9 @@ pub struct Intent {
     /// When the intent was granted (if granted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granted_at: Option<DateTime<Utc>>,
+    /// Risk assessment of this intent (computed at declaration time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskScore>,
 }
 
 /// Current availability of resources on the system.

@@ -69,5 +69,5 @@ pub use client::{RiodClient, RiodClientAsync, DEFAULT_SOCKET};
 pub use transport::ClientError;
 pub use types::{
     AllocateRequest, Allocation, Availability, GpuInfo, Intent, LedgerEntry, LedgerStats,
-    ReleaseResult, SystemStatus,
+    ReleaseResult, RiskFactor, RiskInput, RiskLevel, RiskScore, SystemStatus,
 };

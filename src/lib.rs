@@ -11,5 +11,6 @@ pub mod cgroup;
 pub mod ledger;
 pub mod observe;
 pub mod policy;
+pub mod risk;
 pub mod socket;
 pub mod state;

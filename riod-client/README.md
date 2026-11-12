@@ -91,6 +91,34 @@ client.release(&alloc.id, "my-app")?;
 
 If the daemon has no policy file loaded, allocations work without intents (backward compatible). With policies loaded but no `intent_id` provided, the allocation succeeds but is logged as a warning.
 
+## Risk Scoring
+
+Every intent declaration includes a risk assessment (0–100) across four factors: resource intensity, duration, purpose weight, and system load. You can also do a dry-run assessment before declaring an intent:
+
+```rust
+use riod_client::{RiodClient, RiskInput, RiskLevel};
+
+let client = RiodClient::default_connect()?;
+
+// Dry-run: check risk without committing
+let input = RiskInput::new("training")
+    .with_gpu_count(1)
+    .with_ram_mb(8192)
+    .with_ttl(7200);
+
+let score = client.risk_assess(&input)?;
+println!("Risk: {} ({})", score.total, score.level);
+
+if score.level == RiskLevel::Critical {
+    eprintln!("Request too risky right now — factors:");
+    for f in &score.factors {
+        println!("  - {}: {} pts — {}", f.name, f.points, f.detail);
+    }
+}
+```
+
+Risk levels: **Low** (0–30), **Medium** (31–60), **High** (61–80), **Critical** (81–100).
+
 ## Configuration
 
 - Default socket path: `/run/riod.sock`

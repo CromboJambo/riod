@@ -16,17 +16,17 @@ Per-machine daemon that observes resources, authorizes by purpose, and allocates
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  rIOd Daemon                     │
-│                                                  │
+│                  rIOd Daemon                    │
+│                                                 │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
 │  │ Observer │→ │ Idle     │→ │ Resource      │  │
 │  │ (poll)   │  │ Detector │  │ Broker        │  │
 │  └──────────┘  └──────────┘  └───────┬───────┘  │
 │                                      │          │
-│  ┌──────────┐  ┌──────────┐   ┌─────▼─────┐    │
-│  │ Ledger   │← │ Socket   │←──│ Policy    │    │
-│  │ (JSONL)  │  │ Server   │   │ Engine    │    │
-│  └──────────┘  └──────────┘   └───────────┘    │
+│  ┌──────────┐  ┌──────────┐   ┌─────▼─────┐     │ 
+│  │ Ledger   │← │ Socket   │←──│ Policy    │     │
+│  │ (JSONL)  │  │ Server   │   │ Engine    │     │
+│  └──────────┘  └──────────┘   └───────────┘     │
 │                                                 │
 │  Clients: crabjar, PESTI, herdr, any Rust app   │
 │  via Unix socket JSON-RPC or riod-client crate  │
@@ -115,22 +115,42 @@ See [`riod-client/README.md`](riod-client/README.md) for full API docs.
 
 | Method | Description |
 |--------|-------------|
-| `intent.declare` | Declare purpose before allocating. Returns granted/denied intent with ID. |
+| `intent.declare` | Declare purpose before allocating. Returns granted/denied intent with ID and risk score. |
 | `intent.status` | Query status of a declared intent (granted/consumed/denied). |
 | `policy.list` | List loaded policies and their conditions. |
 | `policy.reload` | Hot-reload policies from file without restart. |
+| `resources.risk_assess` | Dry-run risk assessment for a resource request without declaring an intent. |
 
 All responses include a `doubt` block: `assumptions`, `blind_spots`, `last_validation`, `stale_after`.
 
-## Phase 2: Purpose-Based Authorization
+## Phase 2: Purpose-Based Authorization & Risk Scoring
 
 Clients declare an **intent** before allocating resources. The policy engine evaluates the intent against declarative TOML policies and current system state (CPU/RAM/GPU utilization, idle duration, time of day), then grants or denies it.
+
+### Risk scoring
+
+Every intent declaration includes a quantitative risk assessment (0–100) computed across four weighted factors:
+
+| Factor | Max points | What it measures |
+|--------|-----------|-----------------|
+| Resource intensity | 40 | Fraction of system GPU/RAM/CPU being requested |
+| Duration | 20 | Requested TTL (longer = higher risk) |
+| Purpose weight | 20 | Inherent risk of the purpose category |
+| System load | 20 | Current CPU/RAM/GPU utilization at request time |
+
+**Risk levels:** Low (0–30), Medium (31–60), High (61–80), Critical (81–100)
+
+The risk score is:
+- Attached to every intent (granted or denied) for audit trail
+- Logged to the event ledger with `risk_score` and `risk_level` fields
+- Available via dry-run through `resources.risk_assess` before committing to an allocation
 
 ### Flow
 
 ```
-1. intent.declare {client_id, purpose, ...}  →  {id: "int-...", status: "granted"}
-2. resources.allocate {..., intent_id: "int-..."}  →  allocation (intent consumed)
+1. resources.risk_assess {gpu_count, ram_mb, cpu_percent, ttl_secs, purpose}  →  RiskScore (optional)
+2. intent.declare {client_id, purpose, ...}  →  {id: "int-...", status: "granted", risk: {...}}
+3. resources.allocate {..., intent_id: "int-..."}  →  allocation (intent consumed)
 ```
 
 ### Enforcement rules
@@ -227,6 +247,7 @@ src/           Daemon implementation
   state.rs     Shared daemon state
   api_broker.rs Broker API handlers
   policy.rs    Phase 2 policy engine (intent-based authorization)
+  risk.rs      Risk scoring engine (0-100 across 4 weighted factors)
 
 riod-client/   Client library crate
   src/client.rs    Typed sync + async client API
@@ -246,7 +267,7 @@ examples/      Sample configuration files
 | 1 | Broker: allocation requests, GPU slot management, cgroup enforcement, heartbeats | ✅ Complete |
 | — | Client library: typed sync/async Rust client crate | ✅ Complete |
 | 2 | Policy: purpose-based authorization, intent → allocation enforcement | ✅ Complete |
-| — | Risk scoring integration with crabjar-guard | Planned |
+| — | Risk scoring: 4-factor assessment, dry-run API, ledger audit trail | ✅ Complete |
 | 3 | Dreaming: background cognition on idle compute | Planned |
 
 ## Design Principles
@@ -266,4 +287,3 @@ This is a network daemon with a client library. The AGPL copyleft applies to mod
 
 - [crabjar](https://github.com/CromboJambo/crabjar) — Agent orchestration framework (rIOd's primary client)
 - PESTI — Portable execution substrate for transformer inference
-

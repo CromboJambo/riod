@@ -32,7 +32,7 @@
 //! ```
 
 use crate::transport::{ClientError, Transport};
-use crate::types::{Allocation, AllocateRequest, Availability, GpuInfo, Intent, LedgerEntry, ReleaseResult, SystemStatus};
+use crate::types::{Allocation, AllocateRequest, Availability, GpuInfo, Intent, LedgerEntry, ReleaseResult, RiskInput, RiskScore, SystemStatus};
 use serde_json::json;
 use std::path::Path;
 
@@ -242,6 +242,21 @@ impl RiodClient {
         let intent = &result["data"];
         serde_json::from_value(intent.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
     }
+
+    /// Perform a dry-run risk assessment without declaring an intent.
+    ///
+    /// Corresponds to `resources.risk_assess`. Lets clients check how their request
+    /// would be scored before committing to an allocation. The daemon uses current
+    /// system load (CPU, RAM, GPU utilization) plus the requested resource profile
+    /// to compute a risk score 0-100 with a classified level.
+    pub fn risk_assess(&self, input: &RiskInput) -> Result<RiskScore> {
+        let params = serde_json::to_value(input)?;
+        let result = self.transport.call("resources.risk_assess", Some(params))?;
+
+        // Daemon returns {success, data: RiskScore}
+        let score = &result["data"];
+        serde_json::from_value(score.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+    }
 }
 
 impl Default for RiodClient {
@@ -361,6 +376,14 @@ impl RiodClientAsync {
     pub async fn intent_status(&self, intent_id: String) -> Result<Intent> {
         let client = self.inner.clone();
         tokio::task::spawn_blocking(move || client.intent_status(&intent_id))
+            .await
+            .map_err(|e| ClientError::Async(e.to_string()))?
+    }
+
+    /// Perform a dry-run risk assessment (Phase 2).
+    pub async fn risk_assess(&self, input: RiskInput) -> Result<RiskScore> {
+        let client = self.inner.clone();
+        tokio::task::spawn_blocking(move || client.risk_assess(&input))
             .await
             .map_err(|e| ClientError::Async(e.to_string()))?
     }

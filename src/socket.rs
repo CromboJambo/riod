@@ -181,6 +181,10 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         },
         "policy.list" => handle_policy_list(&id, state).await,
         "policy.reload" => handle_policy_reload(&id, state).await,
+        // Risk assessment (dry-run)
+        "resources.risk_assess" => {
+            handle_risk_assess(&id, request.params.unwrap_or(Value::Null), state).await
+        },
         _ => error_response(
             &id,
             -32601,
@@ -190,7 +194,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "system.status", "ledger.query", "ledger.tail", "ledger.stats",
                     "resources.allocate", "resources.release", "resources.heartbeat",
                     "resources.list", "resources.available", "resources.add_process",
-                    "intent.declare", "intent.status", "policy.list", "policy.reload"
+                    "intent.declare", "intent.status", "policy.list", "policy.reload",
+                    "resources.risk_assess"
                 ]
             })),
         ),
@@ -408,7 +413,7 @@ async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<Se
             crate::policy::IntentStatus::Denied(_) => "intent_denied",
             _ => "intent_declared",
         };
-        ledger.append(crate::ledger::LedgerEvent::Info {
+        let _ = ledger.append(crate::ledger::LedgerEvent::Info {
             message: format!("{}: {} ({})", event_type, intent.id, purpose),
             data: Some(json!({
                 "intent_id": intent.id,
@@ -417,6 +422,8 @@ async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<Se
                 "status": &intent.status,
                 "policy_applied": intent.policy_applied,
                 "failed_conditions": intent.failed_conditions,
+                "risk_score": intent.risk.as_ref().map(|r| r.total),
+                "risk_level": intent.risk.as_ref().map(|r| r.level.to_string()),
             })),
         });
     }
@@ -476,6 +483,45 @@ async fn handle_policy_reload(id: &Option<Value>, state: &Arc<ServerState>) -> V
         ),
         Err(e) => error_response(id, -32603, "Policy reload failed", Some(json!({ "error": e.to_string() }))),
     }
+}
+
+/// Handle `resources.risk_assess` — dry-run risk assessment without declaring intent.
+async fn handle_risk_assess(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let req: crate::risk::RiskInput = match serde_json::from_value(params) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                id,
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": format!("expected RiskInput: {}", e) })),
+            );
+        },
+    };
+
+    let detector = state.detector.lock().unwrap();
+    let snapshot = match detector.latest_snapshot() {
+        Some(s) => s,
+        None => {
+            return error_response(
+                id,
+                -32603,
+                "No resource snapshot available yet",
+                Some(json!({ "message": "observer is still initializing" })),
+            );
+        },
+    };
+
+    let engine = state.policy_engine.lock().unwrap();
+    let score = engine.assess_risk(&req, &snapshot);
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": score,
+        }),
+    )
 }
 
 #[cfg(test)]
