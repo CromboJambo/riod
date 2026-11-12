@@ -152,7 +152,13 @@ impl IdleDetector {
         self.prev_cpu_times = Some(cpu_times);
 
         let ram = read_ram_info()?;
-        let gpus = read_gpu_info()?;
+        let gpus = match read_gpu_info() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "GPU query failed, continuing without GPU data");
+                Vec::new()
+            }
+        };
 
         let snapshot = ResourceSnapshot {
             timestamp: Utc::now(),
