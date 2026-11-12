@@ -9,6 +9,7 @@ pub mod api_broker;
 pub mod broker;
 pub mod cgroup;
 pub mod dream;
+pub mod dream_tasks;
 pub mod ledger;
 pub mod observe;
 pub mod policy;

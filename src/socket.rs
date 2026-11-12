@@ -188,6 +188,13 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         // Phase 3: Dream scheduler methods
         "dream.status" => handle_dream_status(&id, state).await,
         "dream.cancel" => handle_dream_cancel(&id, request.params.unwrap_or(Value::Null), state).await,
+        "dream.tasks" => handle_dream_tasks(&id, state).await,
+        "dream.register_task" => {
+            handle_dream_register_task(&id, request.params.unwrap_or(Value::Null), state).await
+        },
+        "dream.report" => {
+            handle_dream_report(&id, request.params.unwrap_or(Value::Null), state).await
+        },
         _ => error_response(
             &id,
             -32601,
@@ -199,7 +206,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "resources.list", "resources.available", "resources.add_process",
                     "intent.declare", "intent.status", "policy.list", "policy.reload",
                     "resources.risk_assess",
-                    "dream.status", "dream.cancel"
+                    "dream.status", "dream.cancel", "dream.tasks",
+                    "dream.register_task", "dream.report"
                 ]
             })),
         ),
@@ -623,6 +631,110 @@ fn extract_cancel_cycle_id(event: &crate::dream::DreamEvent) -> Option<String> {
     }
 }
 
+/// Handle `dream.tasks` — list all registered dream tasks.
+async fn handle_dream_tasks(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    let registry = state.dream_tasks.lock().unwrap();
+    let tasks: Vec<&crate::dream_tasks::DreamTaskInfo> = registry.list();
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "tasks": tasks,
+                "count": tasks.len(),
+            },
+        }),
+    )
+}
+
+/// Handle `dream.register_task` — register a dream task with the registry.
+///
+/// Params: DreamTaskInfo fields (name, description, provider, estimated_duration_mins, requires_gpu, min_idle_threshold_mins?)
+async fn handle_dream_register_task(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let info: crate::dream_tasks::DreamTaskInfo = match serde_json::from_value(params) {
+        Ok(i) => i,
+        Err(e) => {
+            return error_response(
+                id,
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": format!("expected DreamTaskInfo: {}", e) })),
+            );
+        },
+    };
+
+    let mut registry = state.dream_tasks.lock().unwrap();
+    match registry.register(info.clone()) {
+        Ok(()) => success_response(
+            id,
+            json!({
+                "success": true,
+                "data": { "registered": true, "task": info },
+            }),
+        ),
+        Err(e) => error_response(id, -32602, &e, None),
+    }
+}
+
+/// Handle `dream.report` — submit a dream task result.
+///
+/// Params: DreamTaskResult fields (task_name, cycle_id, client_id, duration_secs, success, error?, observations)
+async fn handle_dream_report(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+    let mut result: crate::dream_tasks::DreamTaskResult = match serde_json::from_value(params) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                id,
+                -32602,
+                "Invalid params",
+                Some(json!({ "error": format!("expected DreamTaskResult: {}", e) })),
+            );
+        },
+    };
+
+    // Fill in completed_at if not provided
+    let now = Utc::now();
+    result.completed_at = now;
+
+    // Log the task completion to the ledger
+    let event = crate::dream_tasks::DreamTaskEvent::Completed {
+        at: now,
+        task_name: result.task_name.clone(),
+        cycle_id: result.cycle_id.clone(),
+        client_id: result.client_id.clone(),
+        success: result.success,
+        duration_secs: result.duration_secs,
+        observation_count: result.observations.len(),
+    };
+
+    let mut ledger = state.ledger.lock().unwrap();
+    if let Err(e) = ledger.append(crate::ledger::LedgerEvent::DreamEvent {
+        data: serde_json::to_value(&event).unwrap_or_default(),
+    }) {
+        tracing::warn!(error = %e, "failed to log dream task completion");
+    }
+
+    // Also store the full result as a separate ledger entry for provenance
+    let _ = ledger.append(crate::ledger::LedgerEvent::DreamEvent {
+        data: serde_json::json!({
+            "task_event": "result",
+            "result": result,
+        }),
+    });
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "reported": true,
+                "observation_count": result.observations.len(),
+            },
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +769,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         });
+        let dream_tasks = crate::dream_tasks::DreamTaskRegistry::new();
 
         let state = Arc::new(ServerState {
             detector: Mutex::new(detector),
@@ -664,6 +777,7 @@ mod tests {
             broker: Mutex::new(broker),
             policy_engine: Mutex::new(policy_engine),
             dream_scheduler: Mutex::new(dream_scheduler),
+            dream_tasks: Mutex::new(dream_tasks),
             started_at: Utc::now(),
             poll_interval_s: 30,
         });

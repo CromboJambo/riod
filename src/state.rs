@@ -5,6 +5,7 @@
 
 use crate::broker::ResourceBroker;
 use crate::dream::DreamScheduler;
+use crate::dream_tasks::DreamTaskRegistry;
 use crate::ledger::EventLedger;
 use crate::observe::IdleDetector;
 use crate::policy::PolicyEngine;
@@ -21,6 +22,8 @@ pub struct ServerState {
     pub policy_engine: Mutex<PolicyEngine>,
     /// Dream cycle scheduler (Phase 3).
     pub dream_scheduler: Mutex<DreamScheduler>,
+    /// Registry of available dream tasks (Phase 3).
+    pub dream_tasks: Mutex<DreamTaskRegistry>,
     /// Daemon start time (for uptime reporting).
     pub started_at: DateTime<Utc>,
     /// Configuration snapshot for status reporting.

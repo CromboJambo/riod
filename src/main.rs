@@ -7,6 +7,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use riod::broker::ResourceBroker;
 use riod::dream::{DreamConfig, DreamScheduler};
+use riod::dream_tasks::DreamTaskRegistry;
 use riod::ledger::{EventLedger, LedgerConfig, LedgerEvent};
 use riod::observe::{IdleDetector, ObserveConfig};
 use riod::socket::{self};
@@ -302,6 +303,10 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         );
     }
 
+    // Initialize dream task registry (Phase 3)
+    let dream_tasks = DreamTaskRegistry::new();
+    let dream_tasks_mutex = std::sync::Mutex::new(dream_tasks);
+
     // Log daemon start event
     {
         let mut ledger = ledger_mutex.lock().unwrap();
@@ -320,6 +325,7 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         broker: broker_mutex,
         policy_engine: policy_mutex,
         dream_scheduler: dream_mutex,
+        dream_tasks: dream_tasks_mutex,
         started_at,
         poll_interval_s: config.poll_interval_s,
     });
