@@ -40,6 +40,9 @@ pub struct AllocateRequest {
     /// Defaults to 300s if not specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_secs: Option<u64>,
+    /// Phase 2: Intent ID from `intent.declare`. Verified against policy before allocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
 }
 
 impl AllocateRequest {
@@ -53,6 +56,7 @@ impl AllocateRequest {
             cpu_percent: None,
             ram_mb: None,
             ttl_secs: None,
+            intent_id: None,
         }
     }
 
@@ -85,6 +89,12 @@ impl AllocateRequest {
         self.ttl_secs = Some(secs);
         self
     }
+
+    /// Attach a Phase 2 intent ID (from `intent.declare`).
+    pub fn with_intent_id(mut self, id: &str) -> Self {
+        self.intent_id = Some(id.to_string());
+        self
+    }
 }
 
 /// An active resource allocation granted by the broker.
@@ -111,6 +121,31 @@ pub struct Allocation {
     /// Cgroup path for resource enforcement (set when cgroup mode is enabled).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cgroup_path: Option<String>,
+}
+
+/// A declared intent for resource allocation (Phase 2 policy engine).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Intent {
+    /// Unique intent identifier.
+    pub id: String,
+    /// Client that declared this intent.
+    pub client_id: String,
+    /// Purpose of the intended allocation.
+    #[serde(rename = "purpose")]
+    pub purpose: serde_json::Value,
+    /// Optional description of what this intent is for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Current status of the intent.
+    pub status: String,
+    /// Policy that was applied (if granted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_applied: Option<String>,
+    /// When the intent was declared.
+    pub declared_at: DateTime<Utc>,
+    /// When the intent was granted (if granted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<DateTime<Utc>>,
 }
 
 /// Current availability of resources on the system.

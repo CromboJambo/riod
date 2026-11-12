@@ -32,7 +32,7 @@
 //! ```
 
 use crate::transport::{ClientError, Transport};
-use crate::types::{Allocation, AllocateRequest, Availability, GpuInfo, LedgerEntry, ReleaseResult, SystemStatus};
+use crate::types::{Allocation, AllocateRequest, Availability, GpuInfo, Intent, LedgerEntry, ReleaseResult, SystemStatus};
 use serde_json::json;
 use std::path::Path;
 
@@ -204,6 +204,44 @@ impl RiodClient {
         let events = &result["data"]["events"];
         serde_json::from_value(events.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
     }
+
+    // ── Phase 2: Policy & Authorization ──────────────────────────────
+
+    /// Declare an intent for resource allocation.
+    ///
+    /// Corresponds to `intent.declare`. The daemon evaluates the intent against
+    /// its loaded policies and current system state, returning a granted or denied
+    /// intent with a unique ID. If granted, use the ID in `AllocateRequest::with_intent_id()`.
+    pub fn declare_intent(
+        &self,
+        client_id: &str,
+        purpose: &str,
+        description: Option<&str>,
+    ) -> Result<Intent> {
+        let params = json!({
+            "client_id": client_id,
+            "purpose": purpose,
+            "description": description,
+        });
+        let result = self.transport.call("intent.declare", Some(params))?;
+
+        // Daemon returns {success, data: Intent}
+        let intent = &result["data"];
+        serde_json::from_value(intent.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+    }
+
+    /// Query the status of a declared intent.
+    ///
+    /// Corresponds to `intent.status`. Returns the current Intent with updated status
+    /// (granted → consumed once used for allocation).
+    pub fn intent_status(&self, intent_id: &str) -> Result<Intent> {
+        let params = json!({ "id": intent_id });
+        let result = self.transport.call("intent.status", Some(params))?;
+
+        // Daemon returns {success, data: Intent}
+        let intent = &result["data"];
+        serde_json::from_value(intent.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+    }
 }
 
 impl Default for RiodClient {
@@ -302,6 +340,27 @@ impl RiodClientAsync {
     pub async fn ledger_tail(&self, n: usize) -> Result<Vec<LedgerEntry>> {
         let client = self.inner.clone();
         tokio::task::spawn_blocking(move || client.ledger_tail(n))
+            .await
+            .map_err(|e| ClientError::Async(e.to_string()))?
+    }
+
+    /// Declare an intent for resource allocation (Phase 2).
+    pub async fn declare_intent(
+        &self,
+        client_id: String,
+        purpose: String,
+        description: Option<String>,
+    ) -> Result<Intent> {
+        let client = self.inner.clone();
+        tokio::task::spawn_blocking(move || client.declare_intent(&client_id, &purpose, description.as_deref()))
+            .await
+            .map_err(|e| ClientError::Async(e.to_string()))?
+    }
+
+    /// Query the status of a declared intent (Phase 2).
+    pub async fn intent_status(&self, intent_id: String) -> Result<Intent> {
+        let client = self.inner.clone();
+        tokio::task::spawn_blocking(move || client.intent_status(&intent_id))
             .await
             .map_err(|e| ClientError::Async(e.to_string()))?
     }

@@ -68,6 +68,6 @@ pub mod types;
 pub use client::{RiodClient, RiodClientAsync, DEFAULT_SOCKET};
 pub use transport::ClientError;
 pub use types::{
-    AllocateRequest, Allocation, Availability, GpuInfo, LedgerEntry, LedgerStats, ReleaseResult,
-    SystemStatus,
+    AllocateRequest, Allocation, Availability, GpuInfo, Intent, LedgerEntry, LedgerStats,
+    ReleaseResult, SystemStatus,
 };
