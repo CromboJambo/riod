@@ -42,7 +42,7 @@ ledger.rs      Append-only JSONL event ledger with query/rehydration
 socket.rs      Unix socket JSON-RPC 2.0 server
 state.rs       Shared daemon state (Arc<Mutex>)
 api_broker.rs  Broker API handlers (allocate/release/heartbeat/list)
-
+policy.rs      Phase 2 policy engine (intent-based authorization, TOML policies)
 riod-client/   Client library crate
 client.rs      Typed sync + async client API
 transport.rs   Unix socket JSON-RPC transport
