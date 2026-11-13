@@ -1,0 +1,26 @@
+# Service profile: llama-server-ftw3
+# Kev-9B GGUF inference server on GPU (RTX 3070 Ti)
+# Managed by riod via /opt/riod-wrappers/riod-run.py
+
+name = "llama-server-ftw3"
+purpose = "inference"
+description = "Kev-9B Q4_K_M inference server (GPU, port 34159)"
+
+[resources]
+gpu_count = 1
+ram_mb = 4096
+cpu_percent = 50
+ttl_secs = 604800  # 7 days — long-lived service, renewed via heartbeat
+
+[command]
+binary = "/home/crombo/.unsloth/llama.cpp/llama-server"
+args = [
+    "-m",
+    "/home/crombo/.cache/huggingface/hub/models--ggml-org--Kev-9B-GGUF/Kev-9B-Q4_K_M.gguf",
+    "--port", "34159",
+    "--host", "0.0.0.0",
+    "-ngl", "-1",
+    "-c", "48384",
+    "--pooling", "mean",
+    "--flash-attn", "on",
+]
