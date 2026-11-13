@@ -1,0 +1,18 @@
+name = "llama-server-lappy"
+purpose = "inference"
+description = "Qwen3.8-4B Q4_K_M inference server (GPU 3050, port 8082)"
+
+[resources]
+gpu_count = 1
+ram_mb = 3072
+cpu_percent = 50
+ttl_secs = 604800
+
+[command]
+binary = "/home/crombo/.local/llama-b11669/llama-server"
+args = [
+    "--model",
+    "/home/crombo/.cache/llama-cpp/models/Qwen3.8-4B-Q4_K_M.gguf",
+    "--port", "8082",
+    "--host", "0.0.0.0",
+]

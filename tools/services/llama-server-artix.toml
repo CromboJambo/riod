@@ -1,0 +1,19 @@
+name = "llama-server-artix"
+purpose = "inference"
+description = "Qwen2.5-3B-Instruct Q4_K_M inference server (CPU-only, port 8084)"
+
+[resources]
+gpu_count = 0
+ram_mb = 3072
+cpu_percent = 50
+ttl_secs = 604800
+
+[command]
+binary = "/home/crombo/llama.cpp/build/bin/llama-server"
+args = [
+    "--model",
+    "/home/crombo/models/qwen2.5-3b-instruct-q4_k_m.gguf",
+    "--port", "8084",
+    "--host", "0.0.0.0",
+    "--n-gpu-layers", "0",
+]

@@ -156,7 +156,7 @@ def main():
     if status is not None:
         log("riod is reachable, requesting resources")
 
-        # Declare intent
+        # Declare intent (only use it for allocation if granted)
         intent_result = riod_call("intent.declare", {
             "client_id": client_id,
             "purpose": purpose,
@@ -164,8 +164,13 @@ def main():
         })
         intent_id = None
         if intent_result and intent_result.get("id"):
-            intent_id = intent_result["id"]
-            log(f"intent declared: {intent_id}")
+            status = intent_result.get("status")
+            if status == "granted":
+                intent_id = intent_result["id"]
+                log(f"intent granted: {intent_id}")
+            else:
+                reason = status.get("denied", "unknown") if isinstance(status, dict) else str(status)
+                log(f"intent not granted ({reason}) — allocating without intent")
 
         # Allocate resources
         alloc_params = {"client_id": client_id, "purpose": purpose}
