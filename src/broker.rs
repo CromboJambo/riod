@@ -82,7 +82,12 @@ fn default_ttl() -> u64 {
     300
 }
 
-/// An active resource allocation.
+/// An active resource allocation tracked by the broker.
+///
+/// This is a **projection** of ledger events, not an independent source of truth.
+/// On daemon restart, these are rebuilt from the event log via
+/// [`crate::projection::rehydrate_allocations`]. The fields here mirror what can be
+/// derived from `AllocationGranted`, `AllocationHeartbeat`, and terminal events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Allocation {
     /// Unique allocation identifier.
@@ -93,10 +98,14 @@ pub struct Allocation {
     pub purpose: String,
     /// GPU indices allocated to this client.
     pub gpus: Vec<u32>,
-    /// Maximum CPU percentage (advisory).
+    /// Maximum CPU percentage (advisory). 100.0 = full machine access.
+    #[serde(default = "default_cpu_percent")]
     pub cpu_percent: f32,
     /// Maximum RAM in MB (advisory).
     pub ram_mb: u64,
+    /// Time-to-live in seconds. Each heartbeat resets the expiry clock
+    /// (sliding window). Stored so rehydration can reconstruct expiry.
+    pub ttl_secs: u64,
     /// When the allocation was granted.
     pub granted_at: DateTime<Utc>,
     /// When the allocation expires without a heartbeat.
@@ -109,6 +118,15 @@ pub struct Allocation {
     /// Dream cycle ID if this allocation was made during a dream cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dream_cycle_id: Option<String>,
+    /// Set when the allocation reaches a terminal state (released/expired).
+    /// `None` means still active from rIOd's perspective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
+}
+
+/// Default CPU percentage for backward-compatible deserialization.
+fn default_cpu_percent() -> f32 {
+    100.0
 }
 
 /// Current state of the resource pool and active allocations.
@@ -336,11 +354,13 @@ impl ResourceBroker {
             gpus: gpu_indices.clone(),
             cpu_percent: request.cpu_percent.unwrap_or(100.0),
             ram_mb: requested_ram,
+            ttl_secs: request.ttl_secs,
             granted_at: now,
             expires_at: now + chrono::Duration::seconds(request.ttl_secs as i64),
             last_heartbeat: now,
             cgroup_path: None,
             dream_cycle_id: request.dream_cycle_id.clone(),
+            end_reason: None,
         };
 
         // Create cgroup for enforcement (if enabled)
@@ -373,6 +393,7 @@ impl ResourceBroker {
             gpus: gpu_indices,
             ram_mb: requested_ram,
             ttl_secs: request.ttl_secs,
+            cpu_percent: request.cpu_percent.unwrap_or(100.0),
         });
 
         Ok(allocation)
@@ -465,7 +486,8 @@ impl ResourceBroker {
 
         let now = Utc::now();
         allocation.last_heartbeat = now;
-        allocation.expires_at = now + chrono::Duration::seconds(300); // reset to default TTL
+        // Sliding window: each heartbeat extends the TTL from now.
+        allocation.expires_at = now + chrono::Duration::seconds(allocation.ttl_secs as i64);
 
         let _ = ledger.append(LedgerEvent::AllocationHeartbeat {
             allocation_id: allocation.id.clone(),
@@ -477,18 +499,46 @@ impl ResourceBroker {
 
     /// Find and release all expired allocations (stale heartbeats).
     /// Returns the number of allocations reclaimed.
+    ///
+    /// Logs `AllocationExpired` events (not `AllocationReleased`) to preserve
+    /// the semantic distinction: expiry means rIOd reclaimed resources due to
+    /// lack of evidence the client is alive; release means the client explicitly
+    /// returned them. Both are terminal, but they mean different things for
+    /// audit and supervisor decision-making.
     pub fn reclaim_expired(&mut self, ledger: &mut EventLedger) -> usize {
         let now = Utc::now();
         let expired: Vec<String> = self
             .allocations
             .iter()
-            .filter(|(_, a)| a.expires_at < now)
+            .filter(|(_, a)| a.expires_at < now && a.end_reason.is_none())
             .map(|(id, _)| id.clone())
             .collect();
 
         let mut count = 0;
         for id in expired {
-            if self.force_release(&id, ledger).is_ok() {
+            if let Some(allocation) = self.allocations.get(&id).cloned() {
+                // Log the expiry event BEFORE removing (ledger is source of truth)
+                let _ = ledger.append(LedgerEvent::AllocationExpired {
+                    allocation_id: allocation.id.clone(),
+                    client_id: allocation.client_id.clone(),
+                    last_heartbeat: allocation.last_heartbeat,
+                    expired_at: now,
+                    gpus: allocation.gpus.clone(),
+                });
+
+                // Free GPU mappings
+                for idx in &allocation.gpus {
+                    self.gpu_to_allocation.remove(idx);
+                }
+
+                // Clean up cgroup (if any)
+                if let Some(cgroups) = &self.cgroups {
+                    if let Err(e) = cgroups.remove(&id) {
+                        tracing::warn!("cgroup cleanup failed for expired {}: {}", id, e);
+                    }
+                }
+
+                self.allocations.remove(&id);
                 count += 1;
             }
         }

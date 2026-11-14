@@ -68,6 +68,10 @@ pub enum LedgerEvent {
         gpus: Vec<u32>,
         ram_mb: u64,
         ttl_secs: u64,
+        /// CPU percentage allocated. Optional for backward compatibility with
+        /// pre-refactor ledger entries (defaults to 100.0 on rehydration).
+        #[serde(default = "default_cpu_percent")]
+        cpu_percent: f32,
     },
 
     /// A resource allocation was released (by client or force).
@@ -82,6 +86,19 @@ pub enum LedgerEvent {
     AllocationHeartbeat {
         allocation_id: String,
         client_id: String,
+    },
+
+    /// An allocation's TTL elapsed without a client heartbeat or release.
+    /// Distinct from `AllocationReleased`: expiry is rIOd reclaiming resources
+    /// due to lack of evidence the client is still alive; release is the client
+    /// explicitly returning them. Both are terminal, but they mean different things
+    /// for audit and supervisor decision-making.
+    AllocationExpired {
+        allocation_id: String,
+        client_id: String,
+        last_heartbeat: DateTime<Utc>,
+        expired_at: DateTime<Utc>,
+        gpus: Vec<u32>,
     },
 
     /// Dream scheduler state change (Phase 3).
@@ -121,6 +138,12 @@ impl Default for LedgerConfig {
             retention_days: 30,
         }
     }
+}
+
+/// Default CPU percentage for backward-compatible ledger entries that don't
+/// include the field (pre-refactor `AllocationGranted` events).
+fn default_cpu_percent() -> f32 {
+    100.0
 }
 
 /// Append-only event ledger backed by a JSONL file.
@@ -235,6 +258,12 @@ impl EventLedger {
 
         // Return in chronological order (file is append-only, so it's already ordered)
         Ok(results)
+    }
+
+    /// Read all events from the ledger, oldest first.
+    /// Used for rehydration: rebuilding broker state from the event log on startup.
+    pub fn all_events(&self) -> Result<Vec<LedgerEntry>, LedgerError> {
+        self.query(None, None, usize::MAX)
     }
 
     /// Get the tail of the ledger (most recent N entries).

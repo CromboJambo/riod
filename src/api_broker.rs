@@ -200,18 +200,36 @@ pub async fn handle_resources_heartbeat(
     }
 }
 
-/// Handle `resources.list` — list all active allocations.
+/// Handle `resources.list` — list all active allocations with derived lifecycle state.
 pub async fn handle_resources_list(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
     let broker = state.broker.lock().unwrap();
     let allocations: Vec<&crate::broker::Allocation> = broker.list_allocations();
+
+    // Include derived lifecycle state in each allocation response.
+    // This is computed on demand from the allocation's fields + current time —
+    // it is never stored as a mutable field (projection, not state).
+    let now = chrono::Utc::now();
+    let enriched: Vec<Value> = allocations
+        .iter()
+        .map(|alloc| {
+            let mut v = serde_json::to_value(alloc).unwrap_or(json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "state".to_string(),
+                    json!(alloc.current_state(now)),
+                );
+            }
+            v
+        })
+        .collect();
 
     success_response(
         id,
         json!({
             "success": true,
             "data": {
-                "allocations": allocations,
-                "count": allocations.len(),
+                "allocations": enriched,
+                "count": enriched.len(),
             },
         }),
     )

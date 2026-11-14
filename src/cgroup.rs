@@ -181,11 +181,13 @@ mod tests {
             gpus: vec![0],
             ram_mb: 1024,
             cpu_percent: 50.0,
+            ttl_secs: 60,
             granted_at: chrono::Utc::now(),
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
             last_heartbeat: chrono::Utc::now(),
             cgroup_path: None,
             dream_cycle_id: None,
+            end_reason: None,
         };
         let req = AllocationRequest {
             client_id: "client".into(),
