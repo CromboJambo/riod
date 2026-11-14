@@ -1,6 +1,6 @@
 # Service profile: llama-server-ftw3
 # Kev-9B GGUF inference server on GPU (RTX 3070 Ti)
-# Managed by riod via /opt/riod-wrappers/riod-run.py
+# Managed by riod via riod-run (Rust wrapper, built from src/bin/riod-run.rs)
 
 name = "llama-server-ftw3"
 purpose = "inference"
