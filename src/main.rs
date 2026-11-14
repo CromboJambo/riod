@@ -330,6 +330,29 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         poll_interval_s: config.poll_interval_s,
     });
 
+    // Validate that registered handlers match the API contract (fail fast at startup)
+    {
+        let contract = riod::contract::ApiContract::current();
+        let handlers = socket::supported_methods();
+        let issues = contract.validate_handlers(&handlers);
+        if !issues.is_empty() {
+            for issue in &issues {
+                tracing::error!("contract validation: {}", issue);
+            }
+            return Err(format!(
+                "API contract validation failed with {} issue(s). \
+                 Fix the mismatch between contract.rs and socket.rs handlers.",
+                issues.len()
+            )
+            .into());
+        }
+        tracing::info!(
+            methods = handlers.len(),
+            version = %contract.version,
+            "API contract validated: all handlers match declared methods"
+        );
+    }
+
     // Spawn the resource observer loop
     let observer_state = Arc::clone(&state);
     let poll_interval = config.poll_interval_s;

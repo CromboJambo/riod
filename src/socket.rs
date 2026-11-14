@@ -60,6 +60,34 @@ pub fn error_response(id: &Option<Value>, code: i32, message: &str, data: Option
     })
 }
 
+/// Return the list of all method names this server handles.
+/// Used at startup to validate against the API contract.
+pub fn supported_methods() -> Vec<&'static str> {
+    vec![
+        "system.status",
+        "contract.info",
+        "ledger.query",
+        "ledger.tail",
+        "ledger.stats",
+        "resources.allocate",
+        "resources.release",
+        "resources.heartbeat",
+        "resources.list",
+        "resources.available",
+        "resources.add_process",
+        "resources.risk_assess",
+        "intent.declare",
+        "intent.status",
+        "policy.list",
+        "policy.reload",
+        "dream.status",
+        "dream.cancel",
+        "dream.tasks",
+        "dream.register_task",
+        "dream.report",
+    ]
+}
+
 /// Start the Unix socket server. Blocks until the task is cancelled.
 pub async fn serve(
     socket_path: PathBuf,
@@ -151,6 +179,7 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
 
     match request.method.as_str() {
         "system.status" => handle_system_status(&id, state).await,
+        "contract.info" => handle_contract_info(&id, state).await,
         "ledger.query" => handle_ledger_query(&id, request.params, state).await,
         "ledger.tail" => handle_ledger_tail(&id, request.params, state).await,
         "ledger.stats" => handle_ledger_stats(&id, state).await,
@@ -250,6 +279,15 @@ async fn handle_system_status(id: &Option<Value>, state: &Arc<ServerState>) -> V
     };
 
     success_response(id, result)
+}
+
+/// Handle `contract.info` — return the full API contract for introspection.
+async fn handle_contract_info(id: &Option<Value>, _state: &Arc<ServerState>) -> Value {
+    let contract = crate::contract::ApiContract::current();
+    success_response(
+        id,
+        serde_json::to_value(&contract).unwrap_or(json!({ "error": "failed to serialize contract" })),
+    )
 }
 
 /// Handle `ledger.query` — query events with filters.
@@ -800,6 +838,37 @@ mod tests {
         assert_eq!(response["id"], 1);
         assert!(response["result"]["success"].as_bool().unwrap());
         assert!(response["result"]["data"]["snapshot"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_contract_info() {
+        let (state, _dir) = test_state();
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "contract.info",
+            "id": 10
+        });
+
+        let response = handle_request(&request.to_string(), &state).await;
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], 10);
+        assert!(response["error"].is_null());
+
+        let data = &response["result"];
+        assert_eq!(data["name"], "riod");
+        // Version is a structured object: {major, minor, patch}
+        assert!(data["version"]["major"].is_u64());
+        assert!(data["version"]["minor"].is_u64());
+        assert!(data["version"]["patch"].is_u64());
+        assert!(data["methods"].is_object());
+        assert!(data["capabilities"].is_array());
+
+        // Verify key methods are present
+        let methods = &data["methods"];
+        assert!(methods["system.status"].is_object());
+        assert!(methods["resources.allocate"].is_object());
+        assert!(methods["contract.info"].is_object());
     }
 
     #[tokio::test]
