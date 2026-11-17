@@ -12,6 +12,29 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Default policy file contents written by `riod init`.
+///
+/// Covers the two primary resource consumers in the lab: inference servers
+/// (unbounded while the GPU is free) and training jobs (idle-gated).
+pub const DEFAULT_POLICY_TOML: &str = r#"
+[policy.inference-anytime]
+purpose = "inference"
+description = "Allow inference allocations at any time"
+conditions = []
+max_duration_s = 3600
+priority = 5
+
+[policy.training-idle]
+purpose = "training"
+description = "Allow training only when the system is idle"
+conditions = [
+    { type = "idle_duration", min_secs = 600 },
+    { type = "gpu_utilization", max_percent = 20 },
+]
+max_duration_s = 14400
+priority = 10
+"#;
+
 /// Error types for policy operations.
 #[derive(Debug, Error)]
 pub enum PolicyError {
@@ -81,9 +104,9 @@ impl Condition {
     pub fn evaluate(&self, snapshot: &ResourceSnapshot, detector: &IdleDetector) -> bool {
         match self {
             Condition::IdleDuration { min_secs } => {
-                let idle_secs = detector.idle_since.map_or(0, |since| {
-                    (Utc::now() - since).num_seconds().max(0) as u64
-                });
+                let idle_secs = detector
+                    .idle_since
+                    .map_or(0, |since| (Utc::now() - since).num_seconds().max(0) as u64);
                 idle_secs >= *min_secs
             }
             Condition::GpuUtilization { max_percent } => {
@@ -230,9 +253,8 @@ impl PolicyEngine {
     /// priority = 10
     /// ```
     pub fn load_from_file(&mut self, path: &Path) -> Result<usize, PolicyError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            PolicyError::ReadFailed(format!("{}: {e}", path.display()))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| PolicyError::ReadFailed(format!("{}: {e}", path.display())))?;
 
         let loaded = Self::parse_toml(&content)?;
         let count = loaded.len();
@@ -259,15 +281,18 @@ impl PolicyEngine {
 
         let mut policies = Vec::new();
         for (name, value) in policy_table {
-            let policy: Policy = toml::Value::try_into(value.clone())
-                .map_err(|e| PolicyError::InvalidPolicy {
+            let policy: Policy =
+                toml::Value::try_into(value.clone()).map_err(|e| PolicyError::InvalidPolicy {
                     name: name.clone(),
                     detail: e.to_string(),
                 })?;
 
             // Validate
             if policy.conditions.is_empty() && policy.max_duration_s.is_none() {
-                tracing::warn!(policy = name, "policy has no conditions or max duration — always grants");
+                tracing::warn!(
+                    policy = name,
+                    "policy has no conditions or max duration — always grants"
+                );
             }
 
             policies.push((name.clone(), policy));
@@ -296,7 +321,11 @@ impl PolicyEngine {
 
     /// Assess risk for a resource request without declaring an intent.
     /// Used by the `resources.risk_assess` API for dry-run evaluation.
-    pub fn assess_risk(&self, input: &crate::risk::RiskInput, snapshot: &ResourceSnapshot) -> RiskScore {
+    pub fn assess_risk(
+        &self,
+        input: &crate::risk::RiskInput,
+        snapshot: &ResourceSnapshot,
+    ) -> RiskScore {
         self.risk_assessor.assess(input, snapshot)
     }
 
@@ -318,9 +347,15 @@ impl PolicyEngine {
 
         // Compute risk score before policy evaluation.
         // Extract resource estimates from metadata if provided by the client.
-        let gpu_count = metadata.get("gpu_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let gpu_count = metadata
+            .get("gpu_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
         let ram_mb = metadata.get("ram_mb").and_then(|v| v.as_u64()).unwrap_or(0);
-        let cpu_percent = metadata.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let cpu_percent = metadata
+            .get("cpu_percent")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
         let ttl_secs = estimated_duration_s.unwrap_or(300);
 
         let risk_input = crate::risk::RiskInput {
@@ -481,7 +516,11 @@ impl PolicyEngine {
 
     /// Verify an intent is valid for allocation: exists, granted, not expired, client matches.
     /// Returns the policy name if valid.
-    pub fn verify_intent_for_allocation(&self, id: &str, client_id: &str) -> Result<String, PolicyError> {
+    pub fn verify_intent_for_allocation(
+        &self,
+        id: &str,
+        client_id: &str,
+    ) -> Result<String, PolicyError> {
         let intent = self
             .intents
             .get(id)
@@ -545,6 +584,23 @@ impl Default for PolicyEngine {
 mod tests {
     use super::*;
     use crate::observe::{GpuInfo, ObserveConfig};
+
+    #[test]
+    fn default_policy_toml_parses_and_covers_inference_and_training() {
+        let policies = PolicyEngine::parse_toml(DEFAULT_POLICY_TOML)
+            .expect("DEFAULT_POLICY_TOML should parse as valid policy TOML");
+        assert_eq!(policies.len(), 2, "expected inference + training policies");
+
+        let by_name = |n: &str| {
+            policies
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
+        assert_eq!(by_name("inference-anytime").purpose, Purpose::Inference);
+        assert_eq!(by_name("training-idle").purpose, Purpose::Training);
+    }
 
     fn test_snapshot() -> ResourceSnapshot {
         ResourceSnapshot {
@@ -701,7 +757,10 @@ conditions = [
         );
 
         assert!(matches!(intent.status, IntentStatus::Denied(_)));
-        assert!(intent.failed_conditions.unwrap().contains(&"idle for >= 600s".to_string()));
+        assert!(intent
+            .failed_conditions
+            .unwrap()
+            .contains(&"idle for >= 600s".to_string()));
     }
 
     #[test]
@@ -727,7 +786,9 @@ conditions = []
             &det,
         );
 
-        assert!(matches!(intent.status, IntentStatus::Denied(ref r) if r.contains("no matching policy")));
+        assert!(
+            matches!(intent.status, IntentStatus::Denied(ref r) if r.contains("no matching policy"))
+        );
     }
 
     #[test]
@@ -835,7 +896,9 @@ conditions = []
         assert!(matches!(intent.status, IntentStatus::Granted));
 
         // Verify with correct client
-        let policy = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap();
+        let policy = engine
+            .verify_intent_for_allocation(&intent.id, "client-a")
+            .unwrap();
         assert_eq!(policy, "allow-inference");
     }
 
@@ -863,7 +926,9 @@ conditions = []
         );
 
         // Wrong client should fail
-        let err = engine.verify_intent_for_allocation(&intent.id, "client-b").unwrap_err();
+        let err = engine
+            .verify_intent_for_allocation(&intent.id, "client-b")
+            .unwrap_err();
         assert!(err.to_string().contains("belongs to client"));
     }
 
@@ -894,14 +959,18 @@ conditions = []
         engine.consume_intent(&intent.id).unwrap();
 
         // Now verification should fail
-        let err = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap_err();
+        let err = engine
+            .verify_intent_for_allocation(&intent.id, "client-a")
+            .unwrap_err();
         assert!(err.to_string().contains("Consumed"));
     }
 
     #[test]
     fn test_verify_intent_not_found() {
         let engine = PolicyEngine::new();
-        let err = engine.verify_intent_for_allocation("int-nonexistent", "client-a").unwrap_err();
+        let err = engine
+            .verify_intent_for_allocation("int-nonexistent", "client-a")
+            .unwrap_err();
         assert!(matches!(err, PolicyError::IntentNotFound(_)));
     }
 
@@ -933,7 +1002,9 @@ conditions = []
         engine.intents.get_mut(&intent.id).unwrap().granted_at = Some(expired_time);
 
         // Should now be expired (300s limit)
-        let err = engine.verify_intent_for_allocation(&intent.id, "client-a").unwrap_err();
+        let err = engine
+            .verify_intent_for_allocation(&intent.id, "client-a")
+            .unwrap_err();
         assert!(err.to_string().contains("expired"));
     }
 }

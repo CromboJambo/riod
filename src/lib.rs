@@ -7,8 +7,8 @@
 
 pub mod api_broker;
 pub mod broker;
-pub mod contract;
 pub mod cgroup;
+pub mod contract;
 pub mod dream;
 pub mod dream_tasks;
 pub mod ledger;
@@ -16,5 +16,6 @@ pub mod observe;
 pub mod policy;
 pub mod projection;
 pub mod risk;
+pub mod services;
 pub mod socket;
 pub mod state;

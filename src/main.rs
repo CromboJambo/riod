@@ -80,6 +80,16 @@ enum Command {
         #[arg(long, default_value_t = 240)]
         dream_cooldown_mins: u64,
     },
+    /// Generate default rIOd configuration files (/etc/riod)
+    Init {
+        /// Path to write the policy file (default: /etc/riod/policies.toml)
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        /// Directory to write service profiles into (default: /etc/riod/services)
+        #[arg(long)]
+        services_dir: Option<PathBuf>,
+    },
     /// Query the event ledger directly (no daemon required)
     Ledger {
         #[command(subcommand)]
@@ -135,7 +145,7 @@ impl Default for DaemonConfig {
             idle_sample_count: 20,
             cgroups_enabled: false,
             socket_perm: 0o777,
-            policy_file: None,
+            policy_file: Some(PathBuf::from("/etc/riod/policies.toml")),
             dream_enabled: false,
             dream_idle_threshold_mins: 120,
             dream_max_cycle_duration_mins: 30,
@@ -158,6 +168,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Init {
+            policy,
+            services_dir,
+        }) => {
+            let policy_path = policy.unwrap_or_else(|| PathBuf::from("/etc/riod/policies.toml"));
+            let services_dir = services_dir.unwrap_or_else(|| PathBuf::from("/etc/riod/services"));
+            run_init(policy_path, services_dir)
+        }
         Some(Command::Ledger { action }) => run_ledger_cli(action),
         Some(Command::Daemon {
             socket_path,
@@ -194,6 +212,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => run_daemon(DaemonConfig::default()).await,
     }
+}
+
+fn run_init(policy_path: PathBuf, services_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = policy_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(&policy_path, riod::policy::DEFAULT_POLICY_TOML)?;
+    std::fs::create_dir_all(&services_dir)?;
+    for (name, content) in riod::services::default_service_profiles() {
+        let path = services_dir.join(format!("{name}.toml"));
+        std::fs::write(&path, content)?;
+        println!("wrote {}", path.display());
+    }
+    println!("wrote {}", policy_path.display());
+    Ok(())
 }
 
 fn run_ledger_cli(action: LedgerAction) -> Result<(), Box<dyn std::error::Error>> {
@@ -273,10 +308,14 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
     if let Some(ref policy_path) = config.policy_file {
         match policy_engine.load_from_file(policy_path) {
             Ok(count) => tracing::info!(path = %policy_path.display(), count, "policy file loaded"),
-            Err(e) => tracing::warn!(error = %e, path = %policy_path.display(), "failed to load policy file, running without policies"),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %policy_path.display(), "failed to load policy file, running without policies")
+            }
         }
     } else {
-        tracing::info!("no policy file specified, intent declarations will be denied (no matching policy)");
+        tracing::info!(
+            "no policy file specified, intent declarations will be denied (no matching policy)"
+        );
     }
 
     // Wrap in mutexes for shared access between observer loop and socket server
@@ -505,11 +544,32 @@ async fn shutdown_signal() {
     }
 }
 
-/// Background task that periodically reclaims expired/stale allocations.
+/// Background task that periodically reclaims expired/stale allocations
+/// and tracks allocation activity based on observed GPU utilization.
 async fn run_reclaim_loop(state: Arc<ServerState>) {
+    let thresholds = riod::broker::AvailabilityThresholds::default();
+
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
+        // Track allocation activity: update last_activity_at for allocations
+        // whose GPUs show actual utilization above the idle threshold. This is
+        // objective evidence of work, independent of client heartbeats.
+        let snapshot = state.detector.lock().unwrap().latest_snapshot().cloned();
+        if let Some(snap) = snapshot {
+            let activity_updated = {
+                let mut broker = state.broker.lock().unwrap();
+                broker.update_allocation_activity(&snap, &thresholds)
+            };
+            if activity_updated > 0 {
+                tracing::debug!(
+                    count = activity_updated,
+                    "updated allocation activity from observed GPU usage"
+                );
+            }
+        }
+
+        // Reclaim expired allocations (TTL elapsed without heartbeat)
         let reclaimed = {
             let mut broker = state.broker.lock().unwrap();
             let mut ledger = state.ledger.lock().unwrap();
