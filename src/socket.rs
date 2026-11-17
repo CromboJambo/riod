@@ -199,31 +199,30 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
             crate::api_broker::handle_resources_add_process(&id, request.params, state).await
         }
         // Phase 2: Policy and intent methods
-        "intent.declare" => handle_intent_declare(
-            &id,
-            request.params.unwrap_or(Value::Null),
-            state,
-        )
-        .await,
+        "intent.declare" => {
+            handle_intent_declare(&id, request.params.unwrap_or(Value::Null), state).await
+        }
         "intent.status" => {
             handle_intent_status(&id, request.params.unwrap_or(Value::Null), state).await
-        },
+        }
         "policy.list" => handle_policy_list(&id, state).await,
         "policy.reload" => handle_policy_reload(&id, state).await,
         // Risk assessment (dry-run)
         "resources.risk_assess" => {
             handle_risk_assess(&id, request.params.unwrap_or(Value::Null), state).await
-        },
+        }
         // Phase 3: Dream scheduler methods
         "dream.status" => handle_dream_status(&id, state).await,
-        "dream.cancel" => handle_dream_cancel(&id, request.params.unwrap_or(Value::Null), state).await,
+        "dream.cancel" => {
+            handle_dream_cancel(&id, request.params.unwrap_or(Value::Null), state).await
+        }
         "dream.tasks" => handle_dream_tasks(&id, state).await,
         "dream.register_task" => {
             handle_dream_register_task(&id, request.params.unwrap_or(Value::Null), state).await
-        },
+        }
         "dream.report" => {
             handle_dream_report(&id, request.params.unwrap_or(Value::Null), state).await
-        },
+        }
         _ => error_response(
             &id,
             -32601,
@@ -286,7 +285,8 @@ async fn handle_contract_info(id: &Option<Value>, _state: &Arc<ServerState>) -> 
     let contract = crate::contract::ApiContract::current();
     success_response(
         id,
-        serde_json::to_value(&contract).unwrap_or(json!({ "error": "failed to serialize contract" })),
+        serde_json::to_value(&contract)
+            .unwrap_or(json!({ "error": "failed to serialize contract" })),
     )
 }
 
@@ -398,7 +398,11 @@ fn ledger_path_string(_state: &Arc<ServerState>) -> String {
 /// Handle `intent.declare` — declare an intent to use resources for a purpose.
 ///
 /// Params: { client_id, purpose, description?, estimated_duration_s?, metadata? }
-async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+async fn handle_intent_declare(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
     let client_id = match params.get("client_id").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => return error_response(id, -32602, "Missing required param: client_id", None),
@@ -419,9 +423,7 @@ async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<Se
         .unwrap_or("")
         .to_string();
 
-    let estimated_duration_s = params
-        .get("estimated_duration_s")
-        .and_then(|v| v.as_u64());
+    let estimated_duration_s = params.get("estimated_duration_s").and_then(|v| v.as_u64());
 
     let metadata = params.get("metadata").cloned().unwrap_or(json!({}));
 
@@ -478,16 +480,23 @@ async fn handle_intent_declare(id: &Option<Value>, params: Value, state: &Arc<Se
         });
     }
 
-    success_response(id, json!({
-        "success": true,
-        "data": intent,
-    }))
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": intent,
+        }),
+    )
 }
 
 /// Handle `intent.status` — check the status of a previously declared intent.
 ///
 /// Params: { id }
-async fn handle_intent_status(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+async fn handle_intent_status(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
     let intent_id = match params.get("id").and_then(|v| v.as_str()) {
         Some(i) => i.to_string(),
         None => return error_response(id, -32602, "Missing required param: id", None),
@@ -531,7 +540,12 @@ async fn handle_policy_reload(id: &Option<Value>, state: &Arc<ServerState>) -> V
                 "data": { "reloaded_policies": count },
             }),
         ),
-        Err(e) => error_response(id, -32603, "Policy reload failed", Some(json!({ "error": e.to_string() }))),
+        Err(e) => error_response(
+            id,
+            -32603,
+            "Policy reload failed",
+            Some(json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -546,7 +560,7 @@ async fn handle_risk_assess(id: &Option<Value>, params: Value, state: &Arc<Serve
                 "Invalid params",
                 Some(json!({ "error": format!("expected RiskInput: {}", e) })),
             );
-        },
+        }
     };
 
     let detector = state.detector.lock().unwrap();
@@ -559,7 +573,7 @@ async fn handle_risk_assess(id: &Option<Value>, params: Value, state: &Arc<Serve
                 "No resource snapshot available yet",
                 Some(json!({ "message": "observer is still initializing" })),
             );
-        },
+        }
     };
 
     let engine = state.policy_engine.lock().unwrap();
@@ -689,7 +703,11 @@ async fn handle_dream_tasks(id: &Option<Value>, state: &Arc<ServerState>) -> Val
 /// Handle `dream.register_task` — register a dream task with the registry.
 ///
 /// Params: DreamTaskInfo fields (name, description, provider, estimated_duration_mins, requires_gpu, min_idle_threshold_mins?)
-async fn handle_dream_register_task(id: &Option<Value>, params: Value, state: &Arc<ServerState>) -> Value {
+async fn handle_dream_register_task(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
     let info: crate::dream_tasks::DreamTaskInfo = match serde_json::from_value(params) {
         Ok(i) => i,
         Err(e) => {
@@ -699,7 +717,7 @@ async fn handle_dream_register_task(id: &Option<Value>, params: Value, state: &A
                 "Invalid params",
                 Some(json!({ "error": format!("expected DreamTaskInfo: {}", e) })),
             );
-        },
+        }
     };
 
     let mut registry = state.dream_tasks.lock().unwrap();
@@ -728,7 +746,7 @@ async fn handle_dream_report(id: &Option<Value>, params: Value, state: &Arc<Serv
                 "Invalid params",
                 Some(json!({ "error": format!("expected DreamTaskResult: {}", e) })),
             );
-        },
+        }
     };
 
     // Fill in completed_at if not provided

@@ -143,7 +143,11 @@ impl RiskAssessor {
             self.score_system_load(snapshot),
         ];
 
-        let total: u8 = factors.iter().map(|f| f.points as u16).sum::<u16>().min(100) as u8;
+        let total: u8 = factors
+            .iter()
+            .map(|f| f.points as u16)
+            .sum::<u16>()
+            .min(100) as u8;
         let level = RiskLevel::from_score(
             total,
             self.config.low_max,
@@ -160,7 +164,11 @@ impl RiskAssessor {
 
     /// Factor 1: Resource intensity (max 40 points).
     /// Based on what fraction of total system resources are requested.
-    fn score_resource_intensity(&self, input: &RiskInput, snapshot: &ResourceSnapshot) -> RiskFactor {
+    fn score_resource_intensity(
+        &self,
+        input: &RiskInput,
+        snapshot: &ResourceSnapshot,
+    ) -> RiskFactor {
         let mut points = 0u8;
         let mut details = Vec::new();
 
@@ -168,7 +176,9 @@ impl RiskAssessor {
         if !snapshot.gpus.is_empty() {
             let total_gpus = snapshot.gpus.len();
             let requested = input.gpu_count;
-            let gpu_points = ((requested as f32 * 20.0) / total_gpus as f32).round().min(20.0) as u8;
+            let gpu_points = ((requested as f32 * 20.0) / total_gpus as f32)
+                .round()
+                .min(20.0) as u8;
             points += gpu_points;
             details.push(format!("GPU {}/{}", requested, total_gpus));
         } else if input.gpu_count > 0 {
@@ -179,9 +189,14 @@ impl RiskAssessor {
 
         // RAM contribution (max 15): fraction of total RAM requested
         if snapshot.ram_total_mb > 0 && input.ram_mb > 0 {
-            let ram_points = ((input.ram_mb as f32 * 15.0) / snapshot.ram_total_mb as f32).round().min(15.0) as u8;
+            let ram_points = ((input.ram_mb as f32 * 15.0) / snapshot.ram_total_mb as f32)
+                .round()
+                .min(15.0) as u8;
             points += ram_points;
-            details.push(format!("RAM {}MB/{}MB", input.ram_mb, snapshot.ram_total_mb));
+            details.push(format!(
+                "RAM {}MB/{}MB",
+                input.ram_mb, snapshot.ram_total_mb
+            ));
         }
 
         // CPU contribution (max 5): fraction of total CPU requested
@@ -209,13 +224,19 @@ impl RiskAssessor {
             0 // 5 min or less — negligible
         } else if ttl_secs <= 3600 {
             // 5 min to 1 hour: linear 0-10
-            (((ttl_secs - 300) as f32 / 3300.0) * 10.0).round().min(10.0) as u8
+            (((ttl_secs - 300) as f32 / 3300.0) * 10.0)
+                .round()
+                .min(10.0) as u8
         } else if ttl_secs <= 14400 {
             // 1 hour to 4 hours: linear 10-15
-            (10.0 + ((ttl_secs - 3600) as f32 / 10800.0) * 5.0).round().min(15.0) as u8
+            (10.0 + ((ttl_secs - 3600) as f32 / 10800.0) * 5.0)
+                .round()
+                .min(15.0) as u8
         } else {
             // Over 4 hours: 15-20, capped
-            (15.0 + ((ttl_secs - 14400) as f32 / 28800.0) * 5.0).round().min(20.0) as u8
+            (15.0 + ((ttl_secs - 14400) as f32 / 28800.0) * 5.0)
+                .round()
+                .min(20.0) as u8
         };
 
         RiskFactor {
@@ -229,10 +250,19 @@ impl RiskAssessor {
     /// Inherent risk by purpose type.
     fn score_purpose(&self, purpose: &Purpose) -> RiskFactor {
         let (points, detail) = match purpose {
-            Purpose::Inference => (5, "inference — typically short-lived, low impact".to_string()),
-            Purpose::Dreaming => (10, "dreaming — background cognition, preemptible".to_string()),
+            Purpose::Inference => (
+                5,
+                "inference — typically short-lived, low impact".to_string(),
+            ),
+            Purpose::Dreaming => (
+                10,
+                "dreaming — background cognition, preemptible".to_string(),
+            ),
             Purpose::Maintenance => (15, "maintenance — variable scope".to_string()),
-            Purpose::Training => (20, "training — high resource consumption, long duration".to_string()),
+            Purpose::Training => (
+                20,
+                "training — high resource consumption, long duration".to_string(),
+            ),
             Purpose::Custom(name) => (15, format!("custom purpose '{}'", name)),
         };
 
@@ -251,7 +281,9 @@ impl RiskAssessor {
 
         // CPU load (max 10): >50% starts contributing
         if snapshot.cpu_usage_percent > 50.0 {
-            let cpu_points = (((snapshot.cpu_usage_percent - 50.0) / 50.0) * 10.0).round().min(10.0) as u8;
+            let cpu_points = (((snapshot.cpu_usage_percent - 50.0) / 50.0) * 10.0)
+                .round()
+                .min(10.0) as u8;
             points += cpu_points;
             details.push(format!("CPU {}%", snapshot.cpu_usage_percent));
         }
@@ -444,19 +476,44 @@ mod tests {
 
         // Busy system — significant load points
         let busy = assessor.score_system_load(&busy_snapshot());
-        assert!(busy.points >= 10, "expected high load points, got {}", busy.points);
+        assert!(
+            busy.points >= 10,
+            "expected high load points, got {}",
+            busy.points
+        );
     }
 
     #[test]
     fn test_risk_level_boundaries() {
         let config = RiskConfig::default();
-        assert_eq!(RiskLevel::from_score(30, config.low_max, config.medium_max, config.high_max), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_score(31, config.low_max, config.medium_max, config.high_max), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(60, config.low_max, config.medium_max, config.high_max), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_score(61, config.low_max, config.medium_max, config.high_max), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(80, config.low_max, config.medium_max, config.high_max), RiskLevel::High);
-        assert_eq!(RiskLevel::from_score(81, config.low_max, config.medium_max, config.high_max), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_score(100, config.low_max, config.medium_max, config.high_max), RiskLevel::Critical);
+        assert_eq!(
+            RiskLevel::from_score(30, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::Low
+        );
+        assert_eq!(
+            RiskLevel::from_score(31, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            RiskLevel::from_score(60, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            RiskLevel::from_score(61, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::High
+        );
+        assert_eq!(
+            RiskLevel::from_score(80, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::High
+        );
+        assert_eq!(
+            RiskLevel::from_score(81, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::Critical
+        );
+        assert_eq!(
+            RiskLevel::from_score(100, config.low_max, config.medium_max, config.high_max),
+            RiskLevel::Critical
+        );
     }
 
     #[test]
@@ -474,7 +531,11 @@ mod tests {
             purpose: Purpose::Inference,
         };
         let score = assessor.assess(&input, &snap);
-        assert!(score.total <= 30, "CPU-only request should be low risk, got {}", score.total);
+        assert!(
+            score.total <= 30,
+            "CPU-only request should be low risk, got {}",
+            score.total
+        );
 
         // GPU request on a GPU-less machine — should flag high resource intensity
         let bad_input = RiskInput {
@@ -485,7 +546,10 @@ mod tests {
             purpose: Purpose::Training,
         };
         let bad_score = assessor.assess(&bad_input, &snap);
-        assert!(bad_score.total > score.total, "GPU request on GPU-less machine should be riskier");
+        assert!(
+            bad_score.total > score.total,
+            "GPU request on GPU-less machine should be riskier"
+        );
     }
 
     #[test]

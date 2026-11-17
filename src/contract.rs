@@ -31,7 +31,11 @@ pub struct ApiVersion {
 
 impl ApiVersion {
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse "MAJOR.MINOR.PATCH" from a string.
@@ -204,8 +208,7 @@ impl ApiContract {
             "ledger.tail".into(),
             MethodSpec {
                 name: "ledger.tail".into(),
-                description: "Get the N most recent ledger events."
-                    .into(),
+                description: "Get the N most recent ledger events.".into(),
                 phase: Phase::Zero,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -231,8 +234,7 @@ impl ApiContract {
             "ledger.stats".into(),
             MethodSpec {
                 name: "ledger.stats".into(),
-                description: "Get ledger statistics (entry count, path)."
-                    .into(),
+                description: "Get ledger statistics (entry count, path).".into(),
                 phase: Phase::Zero,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -290,8 +292,8 @@ impl ApiContract {
             "resources.release".into(),
             MethodSpec {
                 name: "resources.release".into(),
-                description: "Explicitly release an allocation. Only the owning client may release."
-                    .into(),
+                description:
+                    "Explicitly release an allocation. Only the owning client may release.".into(),
                 phase: Phase::One,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -349,8 +351,7 @@ impl ApiContract {
             "resources.list".into(),
             MethodSpec {
                 name: "resources.list".into(),
-                description: "List all active allocations with derived lifecycle state."
-                    .into(),
+                description: "List all active allocations with derived lifecycle state.".into(),
                 phase: Phase::One,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -415,8 +416,7 @@ impl ApiContract {
             "resources.add_process".into(),
             MethodSpec {
                 name: "resources.add_process".into(),
-                description: "Add a PID to an allocation's cgroup for resource enforcement."
-                    .into(),
+                description: "Add a PID to an allocation's cgroup for resource enforcement.".into(),
                 phase: Phase::One,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -446,8 +446,9 @@ impl ApiContract {
             "resources.risk_assess".into(),
             MethodSpec {
                 name: "resources.risk_assess".into(),
-                description: "Dry-run risk assessment without declaring intent or allocating resources."
-                    .into(),
+                description:
+                    "Dry-run risk assessment without declaring intent or allocating resources."
+                        .into(),
                 phase: Phase::Two,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -505,8 +506,7 @@ impl ApiContract {
             "intent.status".into(),
             MethodSpec {
                 name: "intent.status".into(),
-                description: "Check the status of a previously declared intent."
-                    .into(),
+                description: "Check the status of a previously declared intent.".into(),
                 phase: Phase::Two,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -550,8 +550,7 @@ impl ApiContract {
             "policy.reload".into(),
             MethodSpec {
                 name: "policy.reload".into(),
-                description: "Reload policies from the configured TOML file."
-                    .into(),
+                description: "Reload policies from the configured TOML file.".into(),
                 phase: Phase::Two,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -590,8 +589,9 @@ impl ApiContract {
             "dream.cancel".into(),
             MethodSpec {
                 name: "dream.cancel".into(),
-                description: "Cancel an active dream cycle. Preempts all allocations tagged with the cycle."
-                    .into(),
+                description:
+                    "Cancel an active dream cycle. Preempts all allocations tagged with the cycle."
+                        .into(),
                 phase: Phase::Three,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -619,8 +619,7 @@ impl ApiContract {
             "dream.tasks".into(),
             MethodSpec {
                 name: "dream.tasks".into(),
-                description: "List all registered dream tasks."
-                    .into(),
+                description: "List all registered dream tasks.".into(),
                 phase: Phase::Three,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -640,8 +639,7 @@ impl ApiContract {
             "dream.register_task".into(),
             MethodSpec {
                 name: "dream.register_task".into(),
-                description: "Register a dream task with the registry."
-                    .into(),
+                description: "Register a dream task with the registry.".into(),
                 phase: Phase::Three,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -672,8 +670,7 @@ impl ApiContract {
             "dream.report".into(),
             MethodSpec {
                 name: "dream.report".into(),
-                description: "Submit a dream task result with observations."
-                    .into(),
+                description: "Submit a dream task result with observations.".into(),
                 phase: Phase::Three,
                 since_version: version.clone(),
                 deprecated_since: None,
@@ -751,13 +748,19 @@ impl ApiContract {
 
         for name in self.methods.keys() {
             if !registered.contains(&name.as_str()) {
-                issues.push(format!("contract declares '{}' but no handler is registered", name));
+                issues.push(format!(
+                    "contract declares '{}' but no handler is registered",
+                    name
+                ));
             }
         }
 
         for name in registered {
             if !self.methods.contains_key(*name) {
-                issues.push(format!("handler '{}' is registered but not declared in contract", name));
+                issues.push(format!(
+                    "handler '{}' is registered but not declared in contract",
+                    name
+                ));
             }
         }
 
@@ -840,9 +843,9 @@ mod tests {
 
         // Same major, higher minor is compatible
         assert!(v1_1.compatible_with(&v1));
-        assert!(!v1.compatible_with(&v1_1)); // Server can't offer less than client asks... 
-                                            // actually this direction means "can I serve this client?"
-        
+        assert!(!v1.compatible_with(&v1_1)); // Server can't offer less than client asks...
+                                             // actually this direction means "can I serve this client?"
+
         // Different major is incompatible
         assert!(!v2.compatible_with(&v1));
         assert!(!v1.compatible_with(&v2));
@@ -851,19 +854,32 @@ mod tests {
     #[test]
     fn test_current_contract_is_complete() {
         let contract = ApiContract::current();
-        
+
         // All expected methods are present
         let expected = [
-            "system.status", "ledger.query", "ledger.tail", "ledger.stats",
-            "resources.allocate", "resources.release", "resources.heartbeat",
-            "resources.list", "resources.available", "resources.add_process",
+            "system.status",
+            "ledger.query",
+            "ledger.tail",
+            "ledger.stats",
+            "resources.allocate",
+            "resources.release",
+            "resources.heartbeat",
+            "resources.list",
+            "resources.available",
+            "resources.add_process",
             "resources.risk_assess",
-            "intent.declare", "intent.status", "policy.list", "policy.reload",
-            "dream.status", "dream.cancel", "dream.tasks",
-            "dream.register_task", "dream.report",
+            "intent.declare",
+            "intent.status",
+            "policy.list",
+            "policy.reload",
+            "dream.status",
+            "dream.cancel",
+            "dream.tasks",
+            "dream.register_task",
+            "dream.report",
             "contract.info",
         ];
-        
+
         for name in expected {
             assert!(
                 contract.method(name).is_some(),
@@ -876,11 +892,11 @@ mod tests {
     #[test]
     fn test_validate_handlers_catches_mismatches() {
         let contract = ApiContract::current();
-        
+
         // Simulate a handler list missing one method
         let mut handlers: Vec<&str> = contract.methods.keys().map(|s| s.as_str()).collect();
         handlers.pop(); // Remove one
-        
+
         let issues = contract.validate_handlers(&handlers);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("no handler is registered"));
@@ -890,7 +906,7 @@ mod tests {
     fn test_negotiation_same_version() {
         let contract = ApiContract::current();
         let client_v = contract.version.clone();
-        
+
         let negotiated = contract.negotiate(&client_v).unwrap();
         assert_eq!(negotiated.negotiated_version, client_v);
         assert_eq!(negotiated.methods.len(), contract.methods.len());
@@ -900,7 +916,7 @@ mod tests {
     fn test_negotiation_major_mismatch_fails() {
         let contract = ApiContract::current();
         let client_v = ApiVersion::new(2, 0, 0); // Client wants v2, server is v1
-        
+
         let result = contract.negotiate(&client_v);
         assert!(result.is_none());
     }
@@ -910,7 +926,7 @@ mod tests {
         let contract = ApiContract::current();
         let json = serde_json::to_string(&contract).unwrap();
         let deserialized: ApiContract = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.name, contract.name);
         assert_eq!(deserialized.version, contract.version);
         assert_eq!(deserialized.methods.len(), contract.methods.len());

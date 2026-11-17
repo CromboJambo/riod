@@ -15,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status = client.system_status()?;
     println!("\n=== System Status ===");
     println!("CPU: {:.1}%", status.cpu_usage_percent);
-    println!("RAM: {} / {} MB used", status.ram_used_mb, status.ram_total_mb);
+    println!(
+        "RAM: {} / {} MB used",
+        status.ram_used_mb, status.ram_total_mb
+    );
     for gpu in &status.gpus {
         println!(
             "GPU {}: {} ({}% util, {}MB VRAM used)",
@@ -40,9 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Request a GPU allocation for inference using the builder API
     println!("\n=== Requesting Allocation ===");
     let req = AllocateRequest::new("example-app", "inference")
-        .with_ram_mb(4096)      // up to 4GB RAM
+        .with_ram_mb(4096) // up to 4GB RAM
         .with_cpu_percent(50.0) // up to 50% CPU
-        .with_ttl(3600);        // 1 hour TTL
+        .with_ttl(3600); // 1 hour TTL
 
     let alloc = client.allocate(&req)?;
 
@@ -68,7 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Release when done
     let release = client.release(&alloc.id, "example-app")?;
-    println!("\nReleased {}. Freed GPUs: {:?}", release.released, release.gpus_freed);
+    println!(
+        "\nReleased {}. Freed GPUs: {:?}",
+        release.released, release.gpus_freed
+    );
 
     Ok(())
 }

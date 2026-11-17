@@ -145,9 +145,10 @@ impl DreamScheduler {
         match &self.state {
             DreamState::Idle => self.handle_idle_state(system_idle, idle_since, now),
             DreamState::Armed { .. } => self.handle_armed_state(system_idle, idle_since, now),
-            DreamState::Triggered { started_at, max_duration_mins } => {
-                self.handle_triggered_state(system_idle, *started_at, *max_duration_mins, now)
-            }
+            DreamState::Triggered {
+                started_at,
+                max_duration_mins,
+            } => self.handle_triggered_state(system_idle, *started_at, *max_duration_mins, now),
         }
     }
 
@@ -239,7 +240,11 @@ impl DreamScheduler {
             // Activity resumed during dream — preempt
             let duration_secs = (now - started_at).num_seconds();
             let cycle_id = self.current_cycle_id.take();
-            tracing::info!(duration_secs, ?cycle_id, "dream cycle preempted by activity");
+            tracing::info!(
+                duration_secs,
+                ?cycle_id,
+                "dream cycle preempted by activity"
+            );
             self.state = DreamState::Idle;
             self.last_cycle_end = Some(now);
             return Some(DreamEvent::Preempted {
@@ -256,7 +261,11 @@ impl DreamScheduler {
         if elapsed_mins >= max_duration_mins {
             let duration_secs = (now - started_at).num_seconds();
             let cycle_id = self.current_cycle_id.take();
-            tracing::info!(duration_secs, ?cycle_id, "dream cycle completed (max duration)");
+            tracing::info!(
+                duration_secs,
+                ?cycle_id,
+                "dream cycle completed (max duration)"
+            );
             self.state = DreamState::Idle;
             self.last_cycle_end = Some(now);
             return Some(DreamEvent::Completed {
@@ -332,10 +341,7 @@ pub enum DreamEvent {
         threshold_mins: u64,
     },
     /// Scheduler disarmed: activity resumed before threshold.
-    Disarmed {
-        at: DateTime<Utc>,
-        reason: String,
-    },
+    Disarmed { at: DateTime<Utc>, reason: String },
     /// Dream cycle triggered.
     Triggered {
         at: DateTime<Utc>,
@@ -449,7 +455,12 @@ mod tests {
         let event = scheduler.update(true, Some(idle_since), now);
         assert!(event.is_some());
         match event.unwrap() {
-            DreamEvent::Triggered { cycle_number, max_duration_mins, cycle_id, .. } => {
+            DreamEvent::Triggered {
+                cycle_number,
+                max_duration_mins,
+                cycle_id,
+                ..
+            } => {
                 assert_eq!(cycle_number, 1);
                 assert_eq!(max_duration_mins, 5);
                 assert!(!cycle_id.is_empty());
@@ -474,7 +485,11 @@ mod tests {
         let event = scheduler.update(false, None, now + Duration::minutes(2));
         assert!(event.is_some());
         match event.unwrap() {
-            DreamEvent::Preempted { duration_secs, reason, .. } => {
+            DreamEvent::Preempted {
+                duration_secs,
+                reason,
+                ..
+            } => {
                 assert_eq!(reason, "activity resumed");
                 assert!((duration_secs - 120).abs() < 5); // ~2 minutes
             }

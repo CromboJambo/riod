@@ -15,7 +15,10 @@ use std::process::Command;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "riod-dream-consumer", about = "Execute queued dream tasks on riod idle cycles")]
+#[command(
+    name = "riod-dream-consumer",
+    about = "Execute queued dream tasks on riod idle cycles"
+)]
 struct Args {
     /// Directory containing task definition JSON files.
     #[arg(long, default_value = "~/.riod/dream-queue")]
@@ -91,17 +94,19 @@ impl RiodRpc {
         });
 
         // Build payload (newline-terminated)
-        let mut payload = serde_json::to_string(&request)
-            .map_err(|e| format!("serialize request: {}", e))?;
+        let mut payload =
+            serde_json::to_string(&request).map_err(|e| format!("serialize request: {}", e))?;
         payload.push('\n');
 
         // Connect and send
         let mut stream = std::os::unix::net::UnixStream::connect(&self.socket_path)
             .map_err(|e| format!("failed to connect to {}: {}", self.socket_path.display(), e))?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .map_err(|e| format!("set_read_timeout: {}", e))?;
 
-        stream.write_all(payload.as_bytes())
+        stream
+            .write_all(payload.as_bytes())
             .map_err(|e| format!("write: {}", e))?;
         stream.flush().map_err(|e| format!("flush: {}", e))?;
 
@@ -135,7 +140,10 @@ impl RiodRpc {
             return Err(format!("RPC error: {}", error));
         }
 
-        Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(response
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Query dream status.
@@ -338,10 +346,7 @@ fn execute_task(
     let client_id = format!("dream-consumer:{}", task.name);
     let ttl_secs = task.estimated_duration_mins * 60 + 300; // Add 5 min buffer
 
-    println!(
-        "allocating resources for {} (TTL {}s)",
-        task.name, ttl_secs
-    );
+    println!("allocating resources for {} (TTL {}s)", task.name, ttl_secs);
     let alloc_result = rpc.allocate(
         &client_id,
         "dream",
@@ -376,11 +381,7 @@ fn execute_task(
         }
     }
 
-    println!(
-        "executing: {} (in {})",
-        task.command,
-        workdir.display()
-    );
+    println!("executing: {} (in {})", task.command, workdir.display());
     let output = cmd
         .output()
         .map_err(|e| format!("failed to execute command: {}", e))?;

@@ -22,7 +22,10 @@ use std::thread;
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(name = "riod-run", about = "Resource-aware service launcher for riod-managed services")]
+#[command(
+    name = "riod-run",
+    about = "Resource-aware service launcher for riod-managed services"
+)]
 struct Args {
     /// Service name (matches profile file in RIOD_SERVICES_DIR).
     service_name: String,
@@ -69,8 +72,8 @@ fn log(msg: &str) {
 }
 
 fn load_profile(service_name: &str) -> Profile {
-    let services_dir = std::env::var("RIOD_SERVICES_DIR")
-        .unwrap_or_else(|_| "/etc/riod/services".into());
+    let services_dir =
+        std::env::var("RIOD_SERVICES_DIR").unwrap_or_else(|_| "/etc/riod/services".into());
     let profile_path = PathBuf::from(services_dir).join(format!("{}.toml", service_name));
 
     if !profile_path.exists() {
@@ -84,7 +87,11 @@ fn load_profile(service_name: &str) -> Profile {
     let content = match std::fs::read_to_string(&profile_path) {
         Ok(c) => c,
         Err(e) => {
-            log(&format!("failed to read profile {}: {}", profile_path.display(), e));
+            log(&format!(
+                "failed to read profile {}: {}",
+                profile_path.display(),
+                e
+            ));
             std::process::exit(1);
         }
     };
@@ -153,8 +160,8 @@ fn main() {
         }
 
         // Build allocation request from profile
-        let mut req = AllocateRequest::new(&client_id, &profile.purpose)
-            .with_ttl(profile.resources.ttl_secs);
+        let mut req =
+            AllocateRequest::new(&client_id, &profile.purpose).with_ttl(profile.resources.ttl_secs);
 
         if profile.resources.gpu_count > 0 {
             req = req.with_gpu_count(profile.resources.gpu_count);

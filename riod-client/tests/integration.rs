@@ -65,12 +65,16 @@ fn handle_mock_request(request_bytes: &[u8]) -> String {
                 "jsonrpc": "2.0",
                 "error": {"code": -32700, "message": "Parse error"},
                 "id": null
-            }).to_string();
+            })
+            .to_string();
         }
     };
 
     let method = request["method"].as_str().unwrap_or("");
-    let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     let data = match method {
         "resources.allocate" => serde_json::json!({
@@ -162,7 +166,8 @@ fn handle_mock_request(request_bytes: &[u8]) -> String {
                 "jsonrpc": "2.0",
                 "error": {"code": -32601, "message": format!("Method not found: {}", method)},
                 "id": id
-            }).to_string();
+            })
+            .to_string();
         }
     };
 
@@ -285,5 +290,8 @@ fn test_connect_failure() {
     // The actual connection failure happens on first call
     let client = result.unwrap();
     let err = client.available_resources().unwrap_err();
-    assert!(matches!(err, riod_client::ClientError::ConnectFailed { .. }));
+    assert!(matches!(
+        err,
+        riod_client::ClientError::ConnectFailed { .. }
+    ));
 }

@@ -32,7 +32,10 @@
 //! ```
 
 use crate::transport::{ClientError, Transport};
-use crate::types::{Allocation, AllocateRequest, Availability, GpuInfo, Intent, LedgerEntry, ReleaseResult, RiskInput, RiskScore, SystemStatus};
+use crate::types::{
+    AllocateRequest, Allocation, Availability, GpuInfo, Intent, LedgerEntry, ReleaseResult,
+    RiskInput, RiskScore, SystemStatus,
+};
 use serde_json::json;
 use std::path::Path;
 
@@ -85,12 +88,12 @@ impl RiodClient {
 
         if snapshot.is_null() {
             return Err(ClientError::NoData(
-                "system.status returned null snapshot — observer may still be initializing"
-                    .into(),
+                "system.status returned null snapshot — observer may still be initializing".into(),
             ));
         }
 
-        serde_json::from_value(snapshot.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+        serde_json::from_value(snapshot.clone())
+            .map_err(|e| ClientError::Deserialize(e.to_string()))
     }
 
     /// Query current GPU information.
@@ -111,7 +114,8 @@ impl RiodClient {
 
         // Daemon wraps in {success, data: {allocation, message}}
         let allocation = &result["data"]["allocation"];
-        serde_json::from_value(allocation.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+        serde_json::from_value(allocation.clone())
+            .map_err(|e| ClientError::Deserialize(e.to_string()))
     }
 
     /// Release a previously granted allocation.
@@ -162,7 +166,8 @@ impl RiodClient {
 
         // Daemon returns {success, data: {allocations, count}}
         let allocations = &result["data"]["allocations"];
-        serde_json::from_value(allocations.clone()).map_err(|e| ClientError::Deserialize(e.to_string()))
+        serde_json::from_value(allocations.clone())
+            .map_err(|e| ClientError::Deserialize(e.to_string()))
     }
 
     /// Query currently available resources.
@@ -344,7 +349,12 @@ impl RiodClientAsync {
     }
 
     /// Add a process to an allocation's cgroup.
-    pub async fn add_process(&self, allocation_id: String, client_id: String, pid: u32) -> Result<()> {
+    pub async fn add_process(
+        &self,
+        allocation_id: String,
+        client_id: String,
+        pid: u32,
+    ) -> Result<()> {
         let client = self.inner.clone();
         tokio::task::spawn_blocking(move || client.add_process(&allocation_id, &client_id, pid))
             .await
@@ -367,9 +377,11 @@ impl RiodClientAsync {
         description: Option<String>,
     ) -> Result<Intent> {
         let client = self.inner.clone();
-        tokio::task::spawn_blocking(move || client.declare_intent(&client_id, &purpose, description.as_deref()))
-            .await
-            .map_err(|e| ClientError::Async(e.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            client.declare_intent(&client_id, &purpose, description.as_deref())
+        })
+        .await
+        .map_err(|e| ClientError::Async(e.to_string()))?
     }
 
     /// Query the status of a declared intent (Phase 2).
