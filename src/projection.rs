@@ -147,6 +147,7 @@ pub fn rehydrate_allocations(ledger: &EventLedger) -> Result<HashMap<String, All
                         cgroup_path: None, // Not recoverable — cgroups are per-boot
                         dream_cycle_id: None, // Could be recovered if added to event
                         end_reason: None,
+                        last_activity_at: Some(granted_at), // Allocation time = activity
                     },
                 );
             }
@@ -160,7 +161,9 @@ pub fn rehydrate_allocations(ledger: &EventLedger) -> Result<HashMap<String, All
             }
 
             LedgerEvent::AllocationReleased {
-                allocation_id, reason, ..
+                allocation_id,
+                reason,
+                ..
             } => {
                 if let Some(alloc) = projections.get_mut(allocation_id) {
                     alloc.end_reason = Some(reason.clone());
@@ -216,10 +219,7 @@ mod tests {
         for event in events {
             ledger.append(event).unwrap();
         }
-        TestLedger {
-            ledger,
-            _dir: dir,
-        }
+        TestLedger { ledger, _dir: dir }
     }
 
     #[test]
@@ -363,19 +363,29 @@ mod tests {
             cgroup_path: None,
             dream_cycle_id: None,
             end_reason: None,
+            last_activity_at: Some(now),
         };
 
         // Fresh grant: Active
         assert_eq!(alloc.current_state(now), ResourceState::Active);
 
         // After 40s (less than TTL/2 = 50s): still Active
-        assert_eq!(alloc.current_state(now + Duration::seconds(40)), ResourceState::Active);
+        assert_eq!(
+            alloc.current_state(now + Duration::seconds(40)),
+            ResourceState::Active
+        );
 
         // After 60s (more than TTL/2, less than TTL): Unknown
-        assert_eq!(alloc.current_state(now + Duration::seconds(60)), ResourceState::Unknown);
+        assert_eq!(
+            alloc.current_state(now + Duration::seconds(60)),
+            ResourceState::Unknown
+        );
 
         // After 110s (past TTL): Expired
-        assert_eq!(alloc.current_state(now + Duration::seconds(110)), ResourceState::Expired);
+        assert_eq!(
+            alloc.current_state(now + Duration::seconds(110)),
+            ResourceState::Expired
+        );
 
         // Released: terminal
         alloc.end_reason = Some("done".into());
@@ -387,7 +397,7 @@ mod tests {
         // Simulate a pre-refactor ledger entry without cpu_percent
         let dir = tempdir().unwrap();
         let path = dir.path().join("legacy.jsonl");
-        
+
         let legacy_entry = r#"{"id":"evt-0001","timestamp":"2026-11-14T15:00:00Z","event":{"type":"allocation_granted","allocation_id":"alloc-legacy","client_id":"old-client","purpose":"test","gpus":[],"ram_mb":1024,"ttl_secs":300}}"#;
         std::fs::write(&path, legacy_entry).unwrap();
 

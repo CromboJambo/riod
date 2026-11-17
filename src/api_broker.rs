@@ -65,7 +65,16 @@ pub async fn handle_resources_allocate(
     let mut broker = state.broker.lock().unwrap();
     let mut ledger = state.ledger.lock().unwrap();
 
-    match broker.allocate(&request, &mut ledger) {
+    // Get the latest resource snapshot from the observer (actual system usage).
+    // This allows allocate() to check real GPU utilization and free VRAM before
+    // granting — preventing allocation of GPUs that are already busy with external work.
+    let snapshot = state.detector.lock().unwrap().latest_snapshot().cloned();
+
+    // Use default availability thresholds for allocation-time checks.
+    // Phase 1 will make these configurable via CLI/config file.
+    let thresholds = crate::broker::AvailabilityThresholds::default();
+
+    match broker.allocate(&request, &mut ledger, snapshot.as_ref(), &thresholds) {
         Ok(alloc) => {
             // Consume the intent if one was used (one-shot authorization)
             if let Some(intent_id) = &request.intent_id {
@@ -214,10 +223,7 @@ pub async fn handle_resources_list(id: &Option<Value>, state: &Arc<ServerState>)
         .map(|alloc| {
             let mut v = serde_json::to_value(alloc).unwrap_or(json!({}));
             if let Some(obj) = v.as_object_mut() {
-                obj.insert(
-                    "state".to_string(),
-                    json!(alloc.current_state(now)),
-                );
+                obj.insert("state".to_string(), json!(alloc.current_state(now)));
             }
             v
         })

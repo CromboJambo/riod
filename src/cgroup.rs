@@ -72,24 +72,16 @@ impl CgroupManager {
         let cgroup_path = self.root.join(&allocation.id);
 
         // Create the cgroup directory.
-        fs::create_dir_all(&cgroup_path)
-            .map_err(|e| CgroupError::CreateFailed(e.to_string()))?;
+        fs::create_dir_all(&cgroup_path).map_err(|e| CgroupError::CreateFailed(e.to_string()))?;
 
         // Enable memory and cpu controllers for this cgroup.
-        Self::write_param(
-            &cgroup_path.join("cgroup.subtree_control"),
-            "+memory +cpu",
-        )
-        .ok(); // May fail if already set or not delegated — non-fatal.
+        Self::write_param(&cgroup_path.join("cgroup.subtree_control"), "+memory +cpu").ok(); // May fail if already set or not delegated — non-fatal.
 
         // Set memory limit (bytes).
         if let Some(ram_mb) = request.ram_mb {
             let bytes = ram_mb * 1024 * 1024;
-            Self::write_param(
-                &cgroup_path.join("memory.max"),
-                &bytes.to_string(),
-            )
-            .map_err(|e| CgroupError::WriteFailed(e))?;
+            Self::write_param(&cgroup_path.join("memory.max"), &bytes.to_string())
+                .map_err(|e| CgroupError::WriteFailed(e))?;
         }
 
         // Set CPU quota: cpu_percent of one core, per second.
@@ -97,11 +89,8 @@ impl CgroupManager {
         if let Some(cpu_percent) = request.cpu_percent {
             let period = 100_000u64; // 100ms
             let quota = (cpu_percent / 100.0 * period as f32) as u64;
-            Self::write_param(
-                &cgroup_path.join("cpu.max"),
-                &format!("{quota} {period}"),
-            )
-            .map_err(|e| CgroupError::WriteFailed(e))?;
+            Self::write_param(&cgroup_path.join("cpu.max"), &format!("{quota} {period}"))
+                .map_err(|e| CgroupError::WriteFailed(e))?;
         }
 
         Ok(cgroup_path)
@@ -114,11 +103,8 @@ impl CgroupManager {
         }
 
         let cgroup_path = self.root.join(allocation_id);
-        Self::write_param(
-            &cgroup_path.join("cgroup.procs"),
-            &pid.to_string(),
-        )
-        .map_err(|e| CgroupError::WriteFailed(e))
+        Self::write_param(&cgroup_path.join("cgroup.procs"), &pid.to_string())
+            .map_err(|e| CgroupError::WriteFailed(e))
     }
 
     /// Remove and clean up a cgroup.
@@ -134,8 +120,7 @@ impl CgroupManager {
         }
 
         // Remove the directory (must be empty of processes).
-        fs::remove_dir(&cgroup_path)
-            .map_err(|e| CgroupError::CleanupFailed(e.to_string()))?;
+        fs::remove_dir(&cgroup_path).map_err(|e| CgroupError::CleanupFailed(e.to_string()))?;
 
         Ok(())
     }
@@ -188,6 +173,7 @@ mod tests {
             cgroup_path: None,
             dream_cycle_id: None,
             end_reason: None,
+            last_activity_at: None,
         };
         let req = AllocationRequest {
             client_id: "client".into(),

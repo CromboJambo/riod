@@ -122,6 +122,14 @@ pub struct Allocation {
     /// `None` means still active from rIOd's perspective.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
+    /// Timestamp of the last observed resource activity for this allocation.
+    /// Updated on heartbeat and when the broker detects GPU utilization above
+    /// the idle threshold for this allocation's GPUs. Used to determine if an
+    /// allocation is "dormant" (allocated but not doing work) and therefore
+    /// preemptible by new requests. `None` means activity has never been observed
+    /// since allocation (or the field was added after the allocation was created).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 /// Default CPU percentage for backward-compatible deserialization.
@@ -157,6 +165,25 @@ pub struct AvailabilityThresholds {
     /// Minimum free RAM (MB) that must remain after accounting for both
     /// system usage and riod allocations. Default: 2048 MB (2 GB).
     pub min_free_ram_mb: u64,
+    /// GPU utilization (%) below which an allocation's GPU is considered idle.
+    /// Used to determine if an allocation is "dormant" (allocated but not doing work).
+    /// Default: 5%.
+    #[serde(default = "default_idle_util_threshold")]
+    pub idle_utilization_threshold: u8,
+    /// Seconds of inactivity before a dormant allocation becomes preemptible.
+    /// An allocation whose GPUs have all been below `idle_utilization_threshold`
+    /// for this many seconds can be released to make room for new requests.
+    /// Default: 600 (10 minutes).
+    #[serde(default = "default_dormant_timeout")]
+    pub dormant_timeout_secs: u64,
+}
+
+fn default_idle_util_threshold() -> u8 {
+    5
+}
+
+fn default_dormant_timeout() -> u64 {
+    600
 }
 
 impl Default for AvailabilityThresholds {
@@ -165,6 +192,8 @@ impl Default for AvailabilityThresholds {
             min_free_vram_mb: 1024,
             max_gpu_utilization_percent: 80,
             min_free_ram_mb: 2048,
+            idle_utilization_threshold: default_idle_util_threshold(),
+            dormant_timeout_secs: default_dormant_timeout(),
         }
     }
 }
@@ -276,10 +305,20 @@ impl ResourceBroker {
     ///
     /// On success, returns the new `Allocation` and records a `LedgerEvent`.
     /// On failure, returns a `BrokerError` explaining why.
+    ///
+    /// When `snapshot` is provided, this method checks actual GPU utilization
+    /// and free VRAM before granting — preventing allocation of GPUs that are
+    /// already busy with external work. It also preempts dormant allocations
+    /// (allocated but idle beyond `thresholds.dormant_timeout_secs`) to make
+    /// room for new requests. This is the core mechanism for "not reserving
+    /// resources if no work": riod only holds reservations that correspond to
+    /// actual resource usage.
     pub fn allocate(
         &mut self,
         request: &AllocationRequest,
         ledger: &mut EventLedger,
+        snapshot: Option<&ResourceSnapshot>,
+        thresholds: &AvailabilityThresholds,
     ) -> Result<Allocation, BrokerError> {
         // Validate client_id and purpose are non-empty
         if request.client_id.trim().is_empty() {
@@ -293,10 +332,10 @@ impl ResourceBroker {
             ));
         }
 
-        // Determine which GPUs to allocate
+        // Determine which GPUs to allocate (with utilization-aware checks)
         let gpu_indices = match &request.gpus {
             Some(indices) => {
-                // Client requested specific GPUs — verify all are available
+                // Client requested specific GPUs — verify each one
                 for idx in indices {
                     if !self.gpus.iter().any(|g| g.index == *idx) {
                         return Err(BrokerError::InvalidRequest(format!(
@@ -304,32 +343,85 @@ impl ResourceBroker {
                             idx
                         )));
                     }
-                    if let Some(existing) = self.gpu_to_allocation.get(idx) {
-                        return Err(BrokerError::GpuAlreadyAllocated {
-                            index: *idx,
-                            allocation_id: existing.clone(),
-                        });
+
+                    // Check if already allocated by riod — try to preempt if dormant
+                    if let Some(existing_alloc_id) = self.gpu_to_allocation.get(idx) {
+                        let existing_alloc_id_owned = existing_alloc_id.clone();
+
+                        // Check dormancy (immutable borrow of self)
+                        let is_dormant = self
+                            .allocations
+                            .get(&existing_alloc_id_owned)
+                            .map(|a| self.is_allocation_dormant(a, snapshot, thresholds))
+                            .unwrap_or(false);
+
+                        if is_dormant {
+                            tracing::info!(
+                                "Preempting dormant allocation {} for GPU {} — idle beyond {}s threshold",
+                                existing_alloc_id_owned,
+                                idx,
+                                thresholds.dormant_timeout_secs
+                            );
+                            self.remove_allocation(
+                                &existing_alloc_id_owned,
+                                ledger,
+                                "preempted_dormant",
+                            )?;
+                        } else {
+                            return Err(BrokerError::GpuAlreadyAllocated {
+                                index: *idx,
+                                allocation_id: existing_alloc_id_owned,
+                            });
+                        }
+                    }
+
+                    // Check actual utilization from snapshot (if available)
+                    if let Some(snap) = snapshot {
+                        if let Some(snap_gpu) = snap.gpus.iter().find(|g| g.index == *idx) {
+                            let free_vram =
+                                snap_gpu.vram_total_mb.saturating_sub(snap_gpu.vram_used_mb);
+                            if free_vram < thresholds.min_free_vram_mb {
+                                return Err(BrokerError::InsufficientResources(format!(
+                                    "GPU {} has insufficient free VRAM: {}MB < {}MB required",
+                                    idx, free_vram, thresholds.min_free_vram_mb
+                                )));
+                            }
+                            if snap_gpu.utilization_percent
+                                >= thresholds.max_gpu_utilization_percent
+                            {
+                                return Err(BrokerError::InsufficientResources(format!(
+                                    "GPU {} utilization too high: {}% >= {}% threshold",
+                                    idx,
+                                    snap_gpu.utilization_percent,
+                                    thresholds.max_gpu_utilization_percent
+                                )));
+                            }
+                        }
                     }
                 }
                 indices.clone()
             }
             None => {
-                // Auto-assign: pick the first N available GPUs
+                // Auto-assign: use utilization-aware availability
                 let count = request.gpu_count.unwrap_or(1);
                 if count == 0 {
                     return Err(BrokerError::InvalidRequest(
                         "gpu_count must be at least 1".into(),
                     ));
                 }
-                let available = self.available_gpus();
-                if available.len() < count {
+
+                // First, try to free dormant allocations to make room
+                self.preempt_dormant_allocations(snapshot, thresholds, ledger);
+
+                let avail = self.effective_availability(snapshot, thresholds);
+                if avail.available_gpus.len() < count {
                     return Err(BrokerError::InsufficientResources(format!(
-                        "Requested {} GPUs but only {} available",
+                        "Requested {} GPUs but only {} available (utilization-aware)",
                         count,
-                        available.len()
+                        avail.available_gpus.len()
                     )));
                 }
-                available.into_iter().take(count).collect()
+                avail.available_gpus.into_iter().take(count).collect()
             }
         };
 
@@ -361,6 +453,7 @@ impl ResourceBroker {
             cgroup_path: None,
             dream_cycle_id: request.dream_cycle_id.clone(),
             end_reason: None,
+            last_activity_at: Some(now), // Allocation time counts as activity
         };
 
         // Create cgroup for enforcement (if enabled)
@@ -397,6 +490,85 @@ impl ResourceBroker {
         });
 
         Ok(allocation)
+    }
+
+    /// Check if an allocation is dormant (allocated but not actively using resources).
+    /// An allocation is dormant if:
+    /// 1. It has GPUs, AND
+    /// 2. All its GPUs show utilization below `idle_utilization_threshold` in the latest snapshot, AND
+    /// 3. No observed activity for at least `dormant_timeout_secs` seconds
+    pub fn is_allocation_dormant(
+        &self,
+        allocation: &Allocation,
+        snapshot: Option<&ResourceSnapshot>,
+        thresholds: &AvailabilityThresholds,
+    ) -> bool {
+        if allocation.gpus.is_empty() {
+            return false; // CPU-only allocations can't be observed as dormant via GPU util
+        }
+
+        let now = Utc::now();
+
+        // Check last activity timestamp
+        match allocation.last_activity_at {
+            Some(last_active) => {
+                if (now - last_active).num_seconds() < thresholds.dormant_timeout_secs as i64 {
+                    return false; // Recently active
+                }
+            }
+            None => {
+                // No activity observed — check if it's been allocated long enough to matter
+                if (now - allocation.granted_at).num_seconds()
+                    < thresholds.dormant_timeout_secs as i64
+                {
+                    return false; // Too new to be dormant
+                }
+            }
+        }
+
+        // Check current GPU utilization for all GPUs in this allocation
+        if let Some(snap) = snapshot {
+            for gpu_idx in &allocation.gpus {
+                if let Some(snap_gpu) = snap.gpus.iter().find(|g| g.index == *gpu_idx) {
+                    if snap_gpu.utilization_percent >= thresholds.idle_utilization_threshold {
+                        return false; // At least one GPU is actively used
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Scan all active allocations and preempt (release) any that are dormant.
+    /// Called during auto-assignment in `allocate()` to free up resources for new requests.
+    /// Returns the number of allocations preempted.
+    pub fn preempt_dormant_allocations(
+        &mut self,
+        snapshot: Option<&ResourceSnapshot>,
+        thresholds: &AvailabilityThresholds,
+        ledger: &mut EventLedger,
+    ) -> usize {
+        // Collect dormant allocation IDs first (can't mutate while iterating)
+        let dormant_ids: Vec<String> = self
+            .allocations
+            .iter()
+            .filter(|(_, a)| a.end_reason.is_none())
+            .filter(|(_, a)| self.is_allocation_dormant(a, snapshot, thresholds))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        let mut count = 0;
+        for id in dormant_ids {
+            if self
+                .remove_allocation(&id, ledger, "preempted_dormant")
+                .is_ok()
+            {
+                tracing::info!("Preempted dormant allocation {}", id);
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Release an allocation. Only the owning client can release it.
@@ -486,6 +658,9 @@ impl ResourceBroker {
 
         let now = Utc::now();
         allocation.last_heartbeat = now;
+        // A heartbeat from the client is evidence of activity — update last_activity_at.
+        // This resets the dormant timer, preventing preemption while the client is alive.
+        allocation.last_activity_at = Some(now);
         // Sliding window: each heartbeat extends the TTL from now.
         allocation.expires_at = now + chrono::Duration::seconds(allocation.ttl_secs as i64);
 
@@ -563,6 +738,52 @@ impl ResourceBroker {
             }
         }
         count
+    }
+
+    /// Scan all active allocations and update `last_activity_at` for any whose
+    /// GPUs show utilization above the idle threshold in the given snapshot.
+    /// This provides objective evidence of resource usage, independent of client
+    /// heartbeats. An allocation with a busy GPU is "active" regardless of whether
+    /// the client has sent a recent heartbeat.
+    ///
+    /// Returns the number of allocations whose activity was updated.
+    pub fn update_allocation_activity(
+        &mut self,
+        snapshot: &ResourceSnapshot,
+        thresholds: &AvailabilityThresholds,
+    ) -> usize {
+        let now = Utc::now();
+        let mut updated = 0;
+
+        for allocation in self.allocations.values_mut() {
+            if allocation.gpus.is_empty() || allocation.end_reason.is_some() {
+                continue;
+            }
+
+            // Check if any of this allocation's GPUs are actively used
+            let has_activity = allocation.gpus.iter().any(|gpu_idx| {
+                snapshot
+                    .gpus
+                    .iter()
+                    .find(|g| g.index == *gpu_idx)
+                    .map(|g| g.utilization_percent >= thresholds.idle_utilization_threshold)
+                    .unwrap_or(false)
+            });
+
+            if has_activity {
+                // Update last_activity_at only if the new time is more recent
+                // (prevents clock skew from moving it backwards)
+                match allocation.last_activity_at {
+                    Some(last) if last > now => {} // Keep existing (clock safety)
+                    _ => {
+                        allocation.last_activity_at = Some(now);
+                        updated += 1;
+                    }
+                }
+            }
+        }
+
+        updated
     }
 
     /// Get the current pool status.
@@ -852,10 +1073,12 @@ mod tests {
             retention_days: 1,
         })
         .unwrap();
-        broker.allocate(&request, &mut ledger).unwrap();
+        let thresholds = AvailabilityThresholds::default();
+        broker
+            .allocate(&request, &mut ledger, None, &thresholds)
+            .unwrap();
 
         let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 5)], 8192);
-        let thresholds = AvailabilityThresholds::default();
 
         let avail = broker.effective_availability(Some(&snap), &thresholds);
 
@@ -913,5 +1136,347 @@ mod tests {
         // GPUs 0 and 2 should be available, GPU 1 should not
         assert_eq!(avail.available_gpus, vec![0, 2]);
         assert!(!avail.gpu_details[1].available);
+    }
+
+    #[test]
+    fn test_allocate_denied_when_gpu_busy_external() {
+        // Simulate a GPU that's busy with external work (not allocated by riod)
+        let gpus = vec![test_gpu(0, 16384, 512, 95)]; // 95% util — external workload
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 95)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let request = AllocationRequest {
+            client_id: "new-client".into(),
+            purpose: "inference".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(1024),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-busy-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // Allocation should be denied because GPU 0 is at 95% utilization
+        let result = broker.allocate(&request, &mut ledger, Some(&snap), &thresholds);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("utilization too high"));
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_allocate_denied_when_gpu_low_vram_external() {
+        // Simulate a GPU with low free VRAM due to external work
+        let gpus = vec![test_gpu(0, 16384, 16200, 10)]; // Only 184MB free
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 16200, 10)], 8192);
+        let thresholds = AvailabilityThresholds {
+            min_free_vram_mb: 1024,
+            ..Default::default()
+        };
+
+        let request = AllocationRequest {
+            client_id: "new-client".into(),
+            purpose: "inference".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(1024),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-vram-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // Allocation should be denied because only 184MB free < 1024MB threshold
+        let result = broker.allocate(&request, &mut ledger, Some(&snap), &thresholds);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("insufficient free VRAM"));
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_allocate_granted_when_gpu_idle() {
+        // Simulate an idle GPU — allocation should succeed
+        let gpus = vec![test_gpu(0, 16384, 512, 3)]; // Low util, plenty of VRAM
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 3)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let request = AllocationRequest {
+            client_id: "new-client".into(),
+            purpose: "inference".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(1024),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-idle-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // Allocation should succeed
+        let alloc = broker
+            .allocate(&request, &mut ledger, Some(&snap), &thresholds)
+            .unwrap();
+        assert_eq!(alloc.gpus, vec![0]);
+        assert_eq!(alloc.client_id, "new-client");
+        assert!(alloc.last_activity_at.is_some());
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_dormant_allocation_preempted() {
+        // Simulate a dormant allocation (idle GPU, no recent activity)
+        let gpus = vec![test_gpu(0, 16384, 512, 2)]; // GPU idle at 2%
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 2)], 8192);
+
+        // Use a short dormant timeout so we can trigger preemption quickly
+        let thresholds = AvailabilityThresholds {
+            dormant_timeout_secs: 1, // 1 second — for testing
+            idle_utilization_threshold: 5,
+            ..Default::default()
+        };
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-dormant-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // First allocation takes GPU 0
+        let req1 = AllocationRequest {
+            client_id: "sleepy-client".into(),
+            purpose: "idle-task".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 3600, // Long TTL — won't expire naturally
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let alloc1 = broker
+            .allocate(&req1, &mut ledger, Some(&snap), &thresholds)
+            .unwrap();
+
+        // Wait for the dormant timeout to pass
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // Second allocation requests GPU 0 — should preempt the dormant one
+        let req2 = AllocationRequest {
+            client_id: "urgent-client".into(),
+            purpose: "real-work".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let alloc2 = broker
+            .allocate(&req2, &mut ledger, Some(&snap), &thresholds)
+            .unwrap();
+
+        // The new allocation should have GPU 0
+        assert_eq!(alloc2.gpus, vec![0]);
+        assert_eq!(alloc2.client_id, "urgent-client");
+        // The old allocation should be gone
+        assert!(!broker.allocations.contains_key(&alloc1.id));
+        // Only one allocation active now
+        assert_eq!(broker.allocations.len(), 1);
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_active_allocation_not_preempted() {
+        // Simulate an active allocation (GPU busy with real work)
+        let gpus = vec![test_gpu(0, 16384, 512, 90)]; // GPU at 90% — actively working
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 90)], 8192);
+
+        let thresholds = AvailabilityThresholds {
+            dormant_timeout_secs: 1, // Short for testing
+            idle_utilization_threshold: 5,
+            ..Default::default()
+        };
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-active-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // First allocation takes GPU 0 while it's busy (simulating work in progress)
+        let req1 = AllocationRequest {
+            client_id: "working-client".into(),
+            purpose: "training".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 3600,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let alloc1 = broker
+            .allocate(&req1, &mut ledger, None, &thresholds)
+            .unwrap();
+
+        // Wait past dormant timeout
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        // Second allocation requests GPU 0 — should FAIL because GPU is actively used
+        let req2 = AllocationRequest {
+            client_id: "other-client".into(),
+            purpose: "inference".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 300,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+
+        // GPU is at 90% util — allocation should fail (not preempt active work)
+        let result = broker.allocate(&req2, &mut ledger, Some(&snap), &thresholds);
+        assert!(result.is_err());
+        // The original allocation should still be active
+        assert!(broker.allocations.contains_key(&alloc1.id));
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_update_allocation_activity() {
+        let gpus = vec![test_gpu(0, 16384, 512, 90)]; // GPU busy
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let snap = test_snapshot(vec![test_gpu(0, 16384, 512, 90)], 8192);
+        let thresholds = AvailabilityThresholds::default();
+
+        let ledger_path =
+            std::env::temp_dir().join(format!("riod-test-activity-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // Allocate GPU 0
+        let request = AllocationRequest {
+            client_id: "client".into(),
+            purpose: "training".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 3600,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let alloc = broker
+            .allocate(&request, &mut ledger, None, &thresholds)
+            .unwrap();
+
+        // Simulate time passing without heartbeats (but GPU is busy)
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Update activity based on snapshot — should mark allocation as active
+        let updated = broker.update_allocation_activity(&snap, &thresholds);
+        assert_eq!(updated, 1);
+
+        // Verify last_activity_at was updated
+        let current = broker.get_allocation(&alloc.id).unwrap();
+        assert!(current.last_activity_at.is_some());
+
+        let _ = std::fs::remove_file(&ledger_path);
+    }
+
+    #[test]
+    fn test_heartbeat_updates_activity() {
+        let gpus = vec![test_gpu(0, 16384, 512, 5)];
+        let mut broker = ResourceBroker::new(gpus, 32768);
+        let thresholds = AvailabilityThresholds::default();
+
+        let ledger_path = std::env::temp_dir().join(format!(
+            "riod-test-hb-activity-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&ledger_path);
+        let mut ledger = EventLedger::open(crate::ledger::LedgerConfig {
+            path: ledger_path.clone(),
+            retention_days: 1,
+        })
+        .unwrap();
+
+        // Allocate GPU 0
+        let request = AllocationRequest {
+            client_id: "client".into(),
+            purpose: "inference".into(),
+            gpus: Some(vec![0]),
+            gpu_count: None,
+            cpu_percent: None,
+            ram_mb: Some(512),
+            ttl_secs: 3600,
+            intent_id: None,
+            dream_cycle_id: None,
+        };
+        let alloc = broker
+            .allocate(&request, &mut ledger, None, &thresholds)
+            .unwrap();
+        let activity_at_alloc = alloc.last_activity_at.unwrap();
+
+        // Wait a bit then heartbeat
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let updated = broker.heartbeat(&alloc.id, "client", &mut ledger).unwrap();
+
+        // Heartbeat should update last_activity_at to be more recent than allocation time
+        assert!(updated.last_activity_at.is_some());
+        assert!(updated.last_activity_at.unwrap() >= activity_at_alloc);
+
+        let _ = std::fs::remove_file(&ledger_path);
     }
 }

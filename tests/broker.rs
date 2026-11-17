@@ -1,8 +1,9 @@
 //! Integration tests for the resource broker.
 
-use riod::broker::{AllocationRequest, BrokerError, ResourceBroker};
+use riod::broker::{AllocationRequest, AvailabilityThresholds, BrokerError, ResourceBroker};
 use riod::ledger::{EventLedger, LedgerConfig};
 use riod::observe::GpuInfo;
+use std::sync::OnceLock;
 use tempfile::tempdir;
 
 fn test_broker() -> (ResourceBroker, EventLedger, tempfile::TempDir) {
@@ -35,6 +36,11 @@ fn test_broker() -> (ResourceBroker, EventLedger, tempfile::TempDir) {
     (broker, ledger, dir)
 }
 
+fn thresholds() -> &'static AvailabilityThresholds {
+    static THRESHOLDS: OnceLock<AvailabilityThresholds> = OnceLock::new();
+    THRESHOLDS.get_or_init(AvailabilityThresholds::default)
+}
+
 #[test]
 fn test_allocate_specific_gpu() {
     let (mut broker, mut ledger, _dir) = test_broker();
@@ -51,7 +57,9 @@ fn test_allocate_specific_gpu() {
         dream_cycle_id: None,
     };
 
-    let alloc = broker.allocate(&request, &mut ledger).unwrap();
+    let alloc = broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
     assert_eq!(alloc.gpus, vec![0]);
     assert_eq!(alloc.client_id, "test-client");
     assert_eq!(broker.allocations.len(), 1);
@@ -74,7 +82,9 @@ fn test_allocate_auto_assign() {
         dream_cycle_id: None,
     };
 
-    let alloc = broker.allocate(&request, &mut ledger).unwrap();
+    let alloc = broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
     assert_eq!(alloc.gpus.len(), 2);
     assert_eq!(broker.available_gpus().len(), 0);
 }
@@ -95,7 +105,9 @@ fn test_allocate_insufficient_gpus() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    broker.allocate(&req1, &mut ledger).unwrap();
+    broker
+        .allocate(&req1, &mut ledger, None, thresholds())
+        .unwrap();
 
     // Try to allocate 2 more — should fail
     let req2 = AllocationRequest {
@@ -109,7 +121,9 @@ fn test_allocate_insufficient_gpus() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    let err = broker.allocate(&req2, &mut ledger).unwrap_err();
+    let err = broker
+        .allocate(&req2, &mut ledger, None, thresholds())
+        .unwrap_err();
     assert!(matches!(err, BrokerError::InsufficientResources(_)));
 }
 
@@ -128,7 +142,9 @@ fn test_release_by_owner() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    let alloc = broker.allocate(&request, &mut ledger).unwrap();
+    let alloc = broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
 
     // Owner can release
     broker.release(&alloc.id, "owner", &mut ledger).unwrap();
@@ -151,7 +167,9 @@ fn test_release_by_non_owner_fails() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    let alloc = broker.allocate(&request, &mut ledger).unwrap();
+    let alloc = broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
 
     // Non-owner cannot release
     let err = broker
@@ -175,7 +193,9 @@ fn test_heartbeat_extends_ttl() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    let alloc = broker.allocate(&request, &mut ledger).unwrap();
+    let alloc = broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
     let original_expiry = alloc.expires_at;
 
     // Heartbeat should extend expiry
@@ -200,7 +220,9 @@ fn test_reclaim_expired() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    broker.allocate(&request, &mut ledger).unwrap();
+    broker
+        .allocate(&request, &mut ledger, None, thresholds())
+        .unwrap();
     assert_eq!(broker.allocations.len(), 1);
 
     // Wait for expiry
@@ -228,7 +250,9 @@ fn test_reclaim_dream_cycle() {
         intent_id: None,
         dream_cycle_id: Some("dream-cycle-00000001".into()),
     };
-    broker.allocate(&req1, &mut ledger).unwrap();
+    broker
+        .allocate(&req1, &mut ledger, None, thresholds())
+        .unwrap();
 
     // Allocate one GPU without a dream cycle ID (should not be reclaimed)
     let req2 = AllocationRequest {
@@ -242,7 +266,9 @@ fn test_reclaim_dream_cycle() {
         intent_id: None,
         dream_cycle_id: None,
     };
-    broker.allocate(&req2, &mut ledger).unwrap();
+    broker
+        .allocate(&req2, &mut ledger, None, thresholds())
+        .unwrap();
 
     assert_eq!(broker.allocations.len(), 2);
 
