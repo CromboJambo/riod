@@ -56,6 +56,14 @@ Key flags:
 - `--policy-file` — TOML policy file for Phase 2 authorization (optional; without it, all intents are denied)
 - `--socket-perm` — Unix socket permissions in octal (default `777`; restrict on multi-user systems)
 
+### Initialize /etc/riod defaults
+
+```bash
+sudo riod init
+```
+
+Writes the default policy to `/etc/riod/policies.toml` and service profiles to `/etc/riod/services/`. Idempotent — safe to re-run.
+
 ### Query system status
 
 ```bash
@@ -218,6 +226,8 @@ sudo systemctl start riod
 ### Policy file (optional)
 
 Place a TOML policy file at `/etc/riod/policies.toml` and add `--policy-file /etc/riod/policies.toml` to the daemon command line. Without it, all intent declarations are denied (safe default).
+
+Run `riod init` to generate the default policy and service profiles automatically.
 
 Default paths:
 - Socket: `/run/riod.sock`
