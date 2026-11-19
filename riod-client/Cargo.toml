@@ -1,6 +1,6 @@
 [package]
 name = "riod-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Client library for the rIOd system resource supervisor. Communicates with the riod daemon over Unix socket JSON-RPC."
 license = "AGPL-3.0-or-later"

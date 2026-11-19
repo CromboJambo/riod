@@ -2,15 +2,19 @@
 
 Per-machine daemon that observes resources, authorizes by purpose, and allocates GPU/CPU/RAM to clients. Coordinates but never owns process lifecycle (dinit starts/stops/restarts processes; rIOd manages what they're allowed to use).
 
+**Version:** 0.1.1 | **License:** AGPL-3.0-or-later | **Status:** Phase 3 in progress
+
 ## What it does
 
 - **Observes** CPU, RAM, and GPU utilization via `/proc` and `nvidia-smi`
 - **Detects idle** state with configurable thresholds and sample windows
-- **Authorizes** clients by purpose via declarative TOML policies (Phase 2)
+- **Authorizes** clients by purpose via declarative TOML policies + risk scoring
+- **Approves** high-risk allocations from untrusted clients via human-in-the-loop guard
 - **Allocates** resources to clients via Unix socket JSON-RPC API
 - **Enforces** cgroup v2 memory/CPU limits (advisory mode)
+- **Preempts** dormant allocations via utilization-aware activity tracking
+- **Dreams** on idle compute: triggers background cognition cycles when system is idle
 - **Ledgers** all events in an append-only JSONL log
-- **Reclaims** stale allocations via TTL-based heartbeats
 
 ## Architecture
 
@@ -26,7 +30,17 @@ Per-machine daemon that observes resources, authorizes by purpose, and allocates
 │  ┌──────────┐  ┌──────────┐   ┌─────▼─────┐     │ 
 │  │ Ledger   │← │ Socket   │←──│ Policy    │     │
 │  │ (JSONL)  │  │ Server   │   │ Engine    │     │
-│  └──────────┘  └──────────┘   └───────────┘     │
+│  └──────────┘  └──────────┘   └─────┬─────┘     │
+│                                     │           │
+│  ┌──────────────┐  ┌────────────┐   │           │
+│  │ Guard Bridge │←─│ Trust      │←──┘           │
+│  │ (approvals)  │  │ Resolver   │               │
+│  └──────────────┘  └────────────┘               │
+│                                                 │
+│  ┌──────────────┐                               │
+│  │ Dream        │← Idle Detector                │
+│  │ Scheduler    │                               │
+│  └──────────────┘                               │
 │                                                 │
 │  Clients: crabjar, PESTI, herdr, any Rust app   │
 │  via Unix socket JSON-RPC or riod-client crate  │
@@ -55,6 +69,7 @@ cargo build --release
 Key flags:
 - `--policy-file` — TOML policy file for Phase 2 authorization (optional; without it, all intents are denied)
 - `--socket-perm` — Unix socket permissions in octal (default `777`; restrict on multi-user systems)
+- `--dream-enabled` — Enable the dream scheduler (Phase 3)
 
 ### Initialize /etc/riod defaults
 
@@ -82,11 +97,16 @@ let client = RiodClient::default_connect()?;
 let avail = client.available_resources()?;
 println!("Free GPUs: {:?}", avail.available_gpus);
 
-// Allocate resources
+// Declare intent before allocating (Phase 2)
+let intent = client.declare_intent("my-app", "inference", 3600, 1, Some(4096), Some(50))?;
+println!("Intent granted: {}", intent.id);
+
+// Allocate resources with intent enforcement
 let req = AllocateRequest::new("my-app", "inference")
     .with_gpu_count(1)
     .with_ram_mb(4096)
-    .with_ttl(3600);
+    .with_ttl(3600)
+    .with_intent_id(&intent.id);
 let alloc = client.allocate(&req)?;
 println!("Got allocation: {}", alloc.id);
 
@@ -116,7 +136,7 @@ See [`riod-client/README.md`](riod-client/README.md) for full API docs.
 | `resources.release` | Release an allocation |
 | `resources.heartbeat` | Extend allocation TTL |
 | `resources.list` | List active allocations |
-| `resources.available` | Check available resources without allocating |
+| `resources.available` | Check available resources without allocating (utilization-aware) |
 | `resources.add_process` | Add a client PID to the allocation's cgroup |
 
 ### Phase 2: Policy & Authorization
@@ -124,10 +144,24 @@ See [`riod-client/README.md`](riod-client/README.md) for full API docs.
 | Method | Description |
 |--------|-------------|
 | `intent.declare` | Declare purpose before allocating. Returns granted/denied intent with ID and risk score. |
-| `intent.status` | Query status of a declared intent (granted/consumed/denied). |
+| `intent.status` | Query status of a declared intent (granted/consumed/pending-approval/denied). |
 | `policy.list` | List loaded policies and their conditions. |
 | `policy.reload` | Hot-reload policies from file without restart. |
 | `resources.risk_assess` | Dry-run risk assessment for a resource request without declaring an intent. |
+
+### Phase 2: Guard Approvals (Trust-Aware Authorization)
+
+| Method | Description |
+|--------|-------------|
+| `guard.approvals_list` | List pending high-risk allocation approvals awaiting human decision. |
+| `guard.approvals_approve` | Approve a pending allocation by ID. Updates intent status to Consumed. |
+| `guard.approvals_reject` | Reject a pending allocation by ID. Updates intent status to Denied. |
+
+### Phase 3: Dream Scheduler
+
+| Method | Description |
+|--------|-------------|
+| `dream.status` | Query dream scheduler state machine, cycle count, and configuration. |
 
 All responses include a `doubt` block: `assumptions`, `blind_spots`, `last_validation`, `stale_after`.
 
@@ -153,7 +187,21 @@ The risk score is:
 - Logged to the event ledger with `risk_score` and `risk_level` fields
 - Available via dry-run through `resources.risk_assess` before committing to an allocation
 
-### Flow
+### Trust-aware approval flow
+
+High/Critical risk allocations from **untrusted clients** are queued for human approval instead of immediate allocation:
+
+```
+1. intent.declare {client_id, purpose, ...}  →  {status: "pending-approval", risk: {...}}
+2. guard.approvals_list                       →  [{id: "app-...", intent_id: "...", risk_level: "High"}]
+3. guard.approvals_approve {approval_id}      →  intent consumed, allocation proceeds
+   OR
+   guard.approvals_reject {approval_id}       →  intent denied
+```
+
+**Trusted clients** (resolved via `crabjar-guard`'s PID-based trust resolution) auto-approve even High/Critical risk allocations — no human in the loop.
+
+### Flow (standard)
 
 ```
 1. resources.risk_assess {gpu_count, ram_mb, cpu_percent, ttl_secs, purpose}  →  RiskScore (optional)
@@ -186,6 +234,35 @@ max_duration_s = 86400
 ```
 
 See [`examples/policies.toml`](examples/policies.toml) for a complete example with comments.
+
+## Phase 3: Dream Scheduler (Background Cognition)
+
+The dream scheduler monitors system idle state and triggers "dream cycles" after sustained inactivity. It manages the trigger lifecycle and emits ledger events that downstream consumers (crabjar, etc.) can act on.
+
+### State machine
+
+```
+Idle → Armed → Triggered → Idle
+  ↑       ↓         ↓
+  └───────┴─────────┘ (activity resumes / cycle completes)
+```
+
+- **Idle**: System is active or dream mode is disabled.
+- **Armed**: System has been idle; counting toward the trigger threshold.
+- **Triggered**: Threshold reached; a dream cycle is in progress. Downstream consumers should begin background work.
+
+### Configuration (CLI flags)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dream-enabled` | `false` | Enable the dream scheduler |
+| `--dream-idle-threshold-mins` | `120` | Minutes of sustained idle before triggering |
+| `--dream-max-cycle-duration-mins` | `30` | Maximum duration of a single dream cycle |
+| `--dream-cooldown-mins` | `240` | Minimum minutes between consecutive dream cycles |
+
+### Ledger events
+
+Dream scheduler state changes are appended to the event ledger as `DreamEvent` entries with type: `armed`, `triggered`, `preempted`, or `completed`.
 
 ## Deployment
 
@@ -258,6 +335,7 @@ src/           Daemon implementation
   api_broker.rs Broker API handlers
   policy.rs    Phase 2 policy engine (intent-based authorization)
   risk.rs      Risk scoring engine (0-100 across 4 weighted factors)
+  guard_integration.rs  crabjar-guard bridge (trust resolution + approvals)
   dream.rs     Phase 3 dream cycle scheduler (idle-triggered background cognition)
 
 riod-client/   Client library crate
@@ -268,42 +346,10 @@ riod-client/   Client library crate
 
 examples/      Sample configuration files
   policies.toml    Phase 2 policy file example
+
+specs/         Design specifications
+  DREAM_GYROSCOPIC_SCHEDULING_SPEC.md  Phase 3 dream scheduler spec
 ```
-
-### Phase 3: Dream Scheduler
-
-| Method | Description |
-|--------|-------------|
-| `dream.status` | Query dream scheduler state machine, cycle count, and configuration. |
-
-## Phase 3: Dream Scheduler (Background Cognition)
-
-The dream scheduler monitors system idle state and triggers "dream cycles" after sustained inactivity. It does not execute dream tasks itself — it manages the trigger lifecycle and emits ledger events that downstream consumers (crabjar, etc.) can act on.
-
-### State machine
-
-```
-Idle → Armed → Triggered → Idle
-  ↑       ↓         ↓
-  └───────┴─────────┘ (activity resumes / cycle completes)
-```
-
-- **Idle**: System is active or dream mode is disabled.
-- **Armed**: System has been idle; counting toward the trigger threshold.
-- **Triggered**: Threshold reached; a dream cycle is in progress. Downstream consumers should begin background work.
-
-### Configuration (CLI flags)
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dream-enabled` | `false` | Enable the dream scheduler |
-| `--dream-idle-threshold-mins` | `120` | Minutes of sustained idle before triggering |
-| `--dream-max-cycle-duration-mins` | `30` | Maximum duration of a single dream cycle |
-| `--dream-cooldown-mins` | `240` | Minimum minutes between consecutive dream cycles |
-
-### Ledger events
-
-Dream scheduler state changes are appended to the event ledger as `DreamEvent` entries with type: `armed`, `triggered`, `preempted`, or `completed`.
 
 ## Phases
 
@@ -314,7 +360,10 @@ Dream scheduler state changes are appended to the event ledger as `DreamEvent` e
 | — | Client library: typed sync/async Rust client crate | ✅ Complete |
 | 2 | Policy: purpose-based authorization, intent → allocation enforcement | ✅ Complete |
 | — | Risk scoring: 4-factor assessment, dry-run API, ledger audit trail | ✅ Complete |
+| — | Guard integration: trust-aware approval for high-risk allocations | ✅ Complete |
 | 3 | Dreaming: background cognition on idle compute | 🔄 In Progress (scheduler) |
+
+See [`ROADMAP.md`](ROADMAP.md) for the full spec-driven development plan.
 
 ## Design Principles
 
@@ -331,5 +380,5 @@ This is a network daemon with a client library. The AGPL copyleft applies to mod
 
 ## Related Projects
 
-- [crabjar](https://github.com/CromboJambo/crabjar) — Agent orchestration framework (rIOd's primary client)
+- [crabjar](https://github.com/CromboJambo/crabjar) — Agent orchestration framework (rIOd's primary client; provides `crabjar-guard` for trust-aware authorization)
 - PESTI — Portable execution substrate for transformer inference
