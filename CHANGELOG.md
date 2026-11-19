@@ -2,6 +2,17 @@
 
 All notable changes to rIOd are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 3 (GPU Dreaming)
+
+### Added
+
+- **`dream.allocate_gpu`**: Convenience JSON-RPC method that auto-fills the current dream cycle ID from the scheduler, so GPU allocations during dream cycles are automatically tagged and reclaimable. Wraps `resources.allocate`.
+- **Enhanced `dream.status`**: Response now includes `current_cycle_id` (ID of active dream cycle or null) and `cycles_triggered` (total cycles since daemon start), enabling consumers to discover and join active dream cycles without separate calls.
+
+### Details
+
+GPU dreaming flow: system goes idle → dream scheduler triggers a cycle → consumer queries `dream.status` for the current cycle ID → consumer calls `dream.allocate_gpu` with their request (allocation is auto-tagged with the cycle ID) → when activity resumes or cycle completes, all tagged allocations are automatically reclaimed via preemption.
+
 ## [0.1.1] — 2026-11-19
 
 ### Added
