@@ -56,7 +56,7 @@ Spec-driven development plan. Each phase has acceptance criteria that must be me
 | 3.2 | Configurable thresholds: idle duration, max cycle duration, cooldown | ✅ |
 | 3.3 | Preemption on activity: dream cycles yield to foreground work | ✅ |
 | 3.4 | Dream task framework: registry of executable tasks with reporting API | ✅ |
-| 3.5 | GPU dreaming: allocate idle GPUs for background inference/training during dream cycles | 🔄 |
+| 3.5 | GPU dreaming: allocate idle GPUs for background inference/training during dream cycles (`dream.allocate_gpu` + enhanced `dream.status`) | ✅ |
 | 3.6 | Fleet coordination: multi-machine dream scheduling via crabjar-conductor | ⬜ |
 
 **Acceptance**: Dream scheduler triggers after sustained idle, preempts on activity, and emits ledger events that downstream consumers (crabjar) can act on. GPU dreaming allocates idle GPUs for background work without starving foreground allocations.
