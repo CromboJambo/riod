@@ -189,6 +189,11 @@ pub struct Policy {
 pub enum IntentStatus {
     Granted,
     Denied(String),
+    /// Waiting for human approval (High/Critical risk from untrusted client).
+    PendingApproval {
+        approval_id: String,
+        reason: String,
+    },
     Expired,
     Consumed, // Allocation was made against this intent
 }
@@ -555,6 +560,84 @@ impl PolicyEngine {
         }
 
         Ok(intent.policy_applied.clone().unwrap_or_default())
+    }
+
+    /// Set an intent to PendingApproval status (called by guard bridge).
+    pub fn set_pending_approval(
+        &mut self,
+        id: &str,
+        approval_id: String,
+        reason: String,
+    ) -> Result<(), PolicyError> {
+        let intent = self
+            .intents
+            .get_mut(id)
+            .ok_or(PolicyError::IntentNotFound(id.to_string()))?;
+
+        if intent.status != IntentStatus::Granted {
+            return Err(PolicyError::Denied {
+                policy: intent.policy_applied.clone().unwrap_or_default(),
+                reason: format!(
+                    "intent status is {:?}, cannot set to PendingApproval",
+                    intent.status
+                ),
+            });
+        }
+
+        intent.status = IntentStatus::PendingApproval {
+            approval_id,
+            reason,
+        };
+        Ok(())
+    }
+
+    /// Approve a pending intent (called after human approves via guard bridge).
+    pub fn approve_pending_intent(&mut self, id: &str) -> Result<(), PolicyError> {
+        let intent = self
+            .intents
+            .get_mut(id)
+            .ok_or(PolicyError::IntentNotFound(id.to_string()))?;
+
+        match &intent.status {
+            IntentStatus::PendingApproval { .. } => {
+                intent.status = IntentStatus::Granted;
+                intent.granted_at = Some(Utc::now());
+                Ok(())
+            }
+            _ => Err(PolicyError::Denied {
+                policy: intent.policy_applied.clone().unwrap_or_default(),
+                reason: format!(
+                    "intent status is {:?}, not PendingApproval",
+                    intent.status
+                ),
+            }),
+        }
+    }
+
+    /// Reject a pending intent (called after human rejects via guard bridge).
+    pub fn reject_pending_intent(
+        &mut self,
+        id: &str,
+        reason: String,
+    ) -> Result<(), PolicyError> {
+        let intent = self
+            .intents
+            .get_mut(id)
+            .ok_or(PolicyError::IntentNotFound(id.to_string()))?;
+
+        match &intent.status {
+            IntentStatus::PendingApproval { .. } => {
+                intent.status = IntentStatus::Denied(reason);
+                Ok(())
+            }
+            _ => Err(PolicyError::Denied {
+                policy: intent.policy_applied.clone().unwrap_or_default(),
+                reason: format!(
+                    "intent status is {:?}, not PendingApproval",
+                    intent.status
+                ),
+            }),
+        }
     }
 
     /// List all intents (for debugging/monitoring).

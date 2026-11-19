@@ -1,5 +1,6 @@
 //! Unix socket JSON-RPC 2.0 server for rIOd client API.
 
+use crate::risk::RiskLevel;
 use crate::state::ServerState;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -85,6 +86,10 @@ pub fn supported_methods() -> Vec<&'static str> {
         "dream.tasks",
         "dream.register_task",
         "dream.report",
+        // Phase 2: Guard approval methods (crabjar-guard integration)
+        "guard.approvals_list",
+        "guard.approvals_approve",
+        "guard.approvals_reject",
     ]
 }
 
@@ -223,6 +228,14 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         "dream.report" => {
             handle_dream_report(&id, request.params.unwrap_or(Value::Null), state).await
         }
+        // Phase 2: Guard approval methods (crabjar-guard integration)
+        "guard.approvals_list" => handle_guard_approvals_list(&id, state).await,
+        "guard.approvals_approve" => {
+            handle_guard_approvals_approve(&id, request.params.unwrap_or(Value::Null), state).await
+        }
+        "guard.approvals_reject" => {
+            handle_guard_approvals_reject(&id, request.params.unwrap_or(Value::Null), state).await
+        }
         _ => error_response(
             &id,
             -32601,
@@ -235,7 +248,8 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "intent.declare", "intent.status", "policy.list", "policy.reload",
                     "resources.risk_assess",
                     "dream.status", "dream.cancel", "dream.tasks",
-                    "dream.register_task", "dream.report"
+                    "dream.register_task", "dream.report",
+                    "guard.approvals_list", "guard.approvals_approve", "guard.approvals_reject"
                 ]
             })),
         ),
@@ -443,7 +457,7 @@ async fn handle_intent_declare(
     };
 
     // Evaluate intent against policies using the policy engine
-    let intent = {
+    let mut intent = {
         let mut engine = state.policy_engine.lock().unwrap();
         engine.evaluate_intent(
             &client_id,
@@ -457,12 +471,66 @@ async fn handle_intent_declare(
     };
     drop(detector_guard);
 
+    // Phase 2: Route High/Critical risk granted intents through guard bridge for approval.
+    // Low/Medium risk from trusted clients auto-approve; untrusted Medium also requires approval.
+    if let crate::policy::IntentStatus::Granted = intent.status {
+        if let Some(risk) = &intent.risk {
+            let needs_approval = matches!(risk.level, RiskLevel::High | RiskLevel::Critical);
+
+            if needs_approval {
+                // Attempt authorization via guard bridge
+                let approval_result = {
+                    let mut bridge = state.guard_bridge.lock().unwrap();
+                    bridge.authorize_allocation(&intent, &risk.level, None)
+                };
+
+                match approval_result {
+                    Ok(true) => {
+                        // Approved (auto or pre-approved) — intent stays Granted
+                        tracing::info!(
+                            intent_id = %intent.id,
+                            risk_level = %risk.level,
+                            "high/critical risk allocation auto-approved via guard bridge"
+                        );
+                    }
+                    Ok(false) => {
+                        // Queued for human approval — set intent to PendingApproval
+                        let pending = {
+                            let bridge = state.guard_bridge.lock().unwrap();
+                            bridge.list_pending().into_iter().next()
+                        };
+
+                        if let Some(pending) = pending {
+                            let mut engine = state.policy_engine.lock().unwrap();
+                            let _ = engine.set_pending_approval(
+                                &intent.id,
+                                pending.id.clone(),
+                                pending.reason.clone(),
+                            );
+                            intent.status = crate::policy::IntentStatus::PendingApproval {
+                                approval_id: pending.id.clone(),
+                                reason: pending.reason.clone(),
+                            };
+                        }
+                    }
+                    Err(reason) => {
+                        // Denied outright by guard bridge
+                        let mut engine = state.policy_engine.lock().unwrap();
+                        let _ = engine.reject_pending_intent(&intent.id, reason.clone());
+                        intent.status = crate::policy::IntentStatus::Denied(reason);
+                    }
+                }
+            }
+        }
+    }
+
     // Log the intent decision to the ledger
     {
         let mut ledger = state.ledger.lock().unwrap();
         let event_type = match &intent.status {
             crate::policy::IntentStatus::Granted => "intent_granted",
             crate::policy::IntentStatus::Denied(_) => "intent_denied",
+            crate::policy::IntentStatus::PendingApproval { .. } => "intent_pending_approval",
             _ => "intent_declared",
         };
         let _ = ledger.append(crate::ledger::LedgerEvent::Info {
@@ -791,6 +859,131 @@ async fn handle_dream_report(id: &Option<Value>, params: Value, state: &Arc<Serv
     )
 }
 
+/// Handle `guard.approvals_list` — list all pending approvals.
+async fn handle_guard_approvals_list(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
+    let bridge = state.guard_bridge.lock().unwrap();
+    let pending = bridge.list_pending();
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "pending_approvals": pending,
+                "count": pending.len(),
+            },
+        }),
+    )
+}
+
+/// Handle `guard.approvals_approve` — approve a pending allocation.
+///
+/// Params: { approval_id }
+async fn handle_guard_approvals_approve(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
+    let approval_id = match params.get("approval_id").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return error_response(id, -32602, "Missing required param: approval_id", None),
+    };
+
+    // Approve in the guard bridge and get the intent ID
+    let approve_result = {
+        let mut bridge = state.guard_bridge.lock().unwrap();
+        bridge.approve(&approval_id)
+    };
+    let intent_id = match approve_result {
+        Ok(iid) => iid,
+        Err(e) => return error_response(id, -32602, &e, None),
+    };
+
+    // Update the intent status in the policy engine
+    let mut engine = state.policy_engine.lock().unwrap();
+    if let Err(e) = engine.approve_pending_intent(&intent_id) {
+        return error_response(id, -32603, &format!("failed to update intent: {}", e), None);
+    }
+
+    // Log the approval to the ledger
+    let mut ledger = state.ledger.lock().unwrap();
+    let _ = ledger.append(crate::ledger::LedgerEvent::Info {
+        message: format!("allocation approved: {} ({})", intent_id, approval_id),
+        data: Some(json!({
+            "approval_id": approval_id,
+            "intent_id": intent_id,
+        })),
+    });
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "approved": true,
+                "intent_id": intent_id,
+            },
+        }),
+    )
+}
+
+/// Handle `guard.approvals_reject` — reject a pending allocation.
+///
+/// Params: { approval_id, reason? }
+async fn handle_guard_approvals_reject(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
+    let approval_id = match params.get("approval_id").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return error_response(id, -32602, "Missing required param: approval_id", None),
+    };
+
+    let reason = params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rejected by operator")
+        .to_string();
+
+    // Reject in the guard bridge and get the intent ID
+    let reject_result = {
+        let mut bridge = state.guard_bridge.lock().unwrap();
+        bridge.reject(&approval_id)
+    };
+    let intent_id = match reject_result {
+        Ok(iid) => iid,
+        Err(e) => return error_response(id, -32602, &e, None),
+    };
+
+    // Update the intent status in the policy engine
+    let mut engine = state.policy_engine.lock().unwrap();
+    if let Err(e) = engine.reject_pending_intent(&intent_id, reason.clone()) {
+        return error_response(id, -32603, &format!("failed to update intent: {}", e), None);
+    }
+
+    // Log the rejection to the ledger
+    let mut ledger = state.ledger.lock().unwrap();
+    let _ = ledger.append(crate::ledger::LedgerEvent::Info {
+        message: format!("allocation rejected: {} ({})", intent_id, approval_id),
+        data: Some(json!({
+            "approval_id": approval_id,
+            "intent_id": intent_id,
+            "reason": reason,
+        })),
+    });
+
+    success_response(
+        id,
+        json!({
+            "success": true,
+            "data": {
+                "rejected": true,
+                "intent_id": intent_id,
+            },
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +1025,7 @@ mod tests {
             ledger: Mutex::new(ledger),
             broker: Mutex::new(broker),
             policy_engine: Mutex::new(policy_engine),
+            guard_bridge: Mutex::new(crate::guard_integration::GuardBridge::new()),
             dream_scheduler: Mutex::new(dream_scheduler),
             dream_tasks: Mutex::new(dream_tasks),
             started_at: Utc::now(),

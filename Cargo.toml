@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 riod-client = { path = "riod-client" }
+crabjar-guard = { git = "https://github.com/CromboJambo/crabjar.git", branch = "main" }
 signal-hook = "0.3"
 
 [dev-dependencies]

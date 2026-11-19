@@ -6,6 +6,7 @@
 use crate::broker::ResourceBroker;
 use crate::dream::DreamScheduler;
 use crate::dream_tasks::DreamTaskRegistry;
+use crate::guard_integration::GuardBridge;
 use crate::ledger::EventLedger;
 use crate::observe::IdleDetector;
 use crate::policy::PolicyEngine;
@@ -20,6 +21,8 @@ pub struct ServerState {
     pub broker: Mutex<ResourceBroker>,
     /// Policy engine for purpose-based authorization (Phase 2).
     pub policy_engine: Mutex<PolicyEngine>,
+    /// Guard bridge for trust resolution and approval flows (Phase 2, crabjar-guard integration).
+    pub guard_bridge: Mutex<GuardBridge>,
     /// Dream cycle scheduler (Phase 3).
     pub dream_scheduler: Mutex<DreamScheduler>,
     /// Registry of available dream tasks (Phase 3).

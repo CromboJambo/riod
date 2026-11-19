@@ -11,6 +11,7 @@ pub mod cgroup;
 pub mod contract;
 pub mod dream;
 pub mod dream_tasks;
+pub mod guard_integration;
 pub mod ledger;
 pub mod observe;
 pub mod policy;

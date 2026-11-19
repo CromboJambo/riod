@@ -8,11 +8,13 @@ use clap::{Parser, Subcommand};
 use riod::broker::ResourceBroker;
 use riod::dream::{DreamConfig, DreamScheduler};
 use riod::dream_tasks::DreamTaskRegistry;
+use riod::guard_integration::GuardBridge;
 use riod::ledger::{EventLedger, LedgerConfig, LedgerEvent};
 use riod::observe::{IdleDetector, ObserveConfig};
 use riod::socket::{self};
 use riod::state::ServerState;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::Arc;
 use tokio::signal;
 
@@ -363,6 +365,7 @@ async fn run_daemon(config: DaemonConfig) -> Result<(), Box<dyn std::error::Erro
         ledger: ledger_mutex,
         broker: broker_mutex,
         policy_engine: policy_mutex,
+        guard_bridge: Mutex::new(GuardBridge::new()),
         dream_scheduler: dream_mutex,
         dream_tasks: dream_tasks_mutex,
         started_at,
