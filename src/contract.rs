@@ -579,7 +579,11 @@ impl ApiContract {
                 params_schema: serde_json::json!({ "type": "null" }),
                 returns_schema: serde_json::json!({
                     "type": "object",
-                    "description": "DreamSchedulerState"
+                    "properties": {
+                        "state": { "description": "DreamSchedulerState" },
+                        "current_cycle_id": { "type": ["string", "null"], "description": "ID of the current dream cycle if active, null otherwise" },
+                        "cycles_triggered": { "type": "integer", "description": "Total number of dream cycles triggered since daemon start" }
+                    }
                 }),
                 mutating: false,
             },
@@ -692,6 +696,40 @@ impl ApiContract {
                     "properties": {
                         "reported": { "type": "boolean" },
                         "observation_count": { "type": "integer" }
+                    }
+                }),
+                mutating: true,
+            },
+        );
+
+        methods.insert(
+            "dream.allocate_gpu".into(),
+            MethodSpec {
+                name: "dream.allocate_gpu".into(),
+                description:
+                    "Allocate a GPU during an active dream cycle. Convenience wrapper around resources.allocate that auto-fills the current dream cycle ID, so allocations are automatically tagged and reclaimable."
+                        .into(),
+                phase: Phase::Three,
+                since_version: version.clone(),
+                deprecated_since: None,
+                params_schema: serde_json::json!({
+                    "type": "object",
+                    "required": ["client_id"],
+                    "properties": {
+                        "client_id": { "type": "string", "description": "Unique identifier for the requesting client" },
+                        "purpose": { "type": "string", "description": "Why resources are needed (e.g., 'dreaming', 'training')" },
+                        "description": { "type": "string", "description": "Human-readable description of the allocation" },
+                        "priority": { "type": ["integer", "null"], "description": "Priority level for scheduling (higher = more important)" },
+                        "vram_request_mb": { "type": ["integer", "null"], "description": "VRAM in MB to reserve on the GPU" },
+                        "duration_secs": { "type": ["integer", "null"], "description": "How long the allocation is needed in seconds (defaults to dream cycle duration)" }
+                    },
+                    "additionalProperties": false
+                }),
+                returns_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "allocation": { "$ref": "#/definitions/Allocation" },
+                        "message": { "type": "string" }
                     }
                 }),
                 mutating: true,
@@ -877,6 +915,7 @@ mod tests {
             "dream.tasks",
             "dream.register_task",
             "dream.report",
+            "dream.allocate_gpu",
             "contract.info",
         ];
 

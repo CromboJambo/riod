@@ -86,6 +86,7 @@ pub fn supported_methods() -> Vec<&'static str> {
         "dream.tasks",
         "dream.register_task",
         "dream.report",
+        "dream.allocate_gpu",
         // Phase 2: Guard approval methods (crabjar-guard integration)
         "guard.approvals_list",
         "guard.approvals_approve",
@@ -228,6 +229,9 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
         "dream.report" => {
             handle_dream_report(&id, request.params.unwrap_or(Value::Null), state).await
         }
+        "dream.allocate_gpu" => {
+            handle_dream_allocate_gpu(&id, request.params.unwrap_or(Value::Null), state).await
+        }
         // Phase 2: Guard approval methods (crabjar-guard integration)
         "guard.approvals_list" => handle_guard_approvals_list(&id, state).await,
         "guard.approvals_approve" => {
@@ -248,7 +252,7 @@ async fn handle_request(line: &str, state: &Arc<ServerState>) -> Value {
                     "intent.declare", "intent.status", "policy.list", "policy.reload",
                     "resources.risk_assess",
                     "dream.status", "dream.cancel", "dream.tasks",
-                    "dream.register_task", "dream.report",
+                    "dream.register_task", "dream.report", "dream.allocate_gpu",
                     "guard.approvals_list", "guard.approvals_approve", "guard.approvals_reject"
                 ]
             })),
@@ -662,12 +666,18 @@ async fn handle_risk_assess(id: &Option<Value>, params: Value, state: &Arc<Serve
 async fn handle_dream_status(id: &Option<Value>, state: &Arc<ServerState>) -> Value {
     let scheduler = state.dream_scheduler.lock().unwrap();
     let status = scheduler.state();
+    let cycle_id = scheduler.current_cycle_id();
+    let cycles_triggered = scheduler.cycles_triggered();
 
     success_response(
         id,
         json!({
             "success": true,
-            "data": status,
+            "data": {
+                "state": status,
+                "current_cycle_id": cycle_id,
+                "cycles_triggered": cycles_triggered,
+            },
         }),
     )
 }
@@ -857,6 +867,46 @@ async fn handle_dream_report(id: &Option<Value>, params: Value, state: &Arc<Serv
             },
         }),
     )
+}
+
+/// Handle `dream.allocate_gpu` — allocate a GPU during an active dream cycle.
+/// Convenience wrapper around `resources.allocate` that auto-fills the current
+/// dream cycle ID, so allocations are automatically tagged and reclaimable.
+///
+/// Params: { client_id, purpose?, description?, priority?, vram_request_mb?, duration_secs? }
+async fn handle_dream_allocate_gpu(
+    id: &Option<Value>,
+    params: Value,
+    state: &Arc<ServerState>,
+) -> Value {
+    // Get the current dream cycle ID (drop lock before any await)
+    let cycle_id: Option<String> = {
+        let scheduler = state.dream_scheduler.lock().unwrap();
+        scheduler.current_cycle_id().map(|cid| cid.to_string())
+    };
+
+    let cycle_id = match cycle_id {
+        Some(cid) => cid,
+        None => {
+            return error_response(
+                id,
+                -32602,
+                "No active dream cycle",
+                Some(json!({
+                    "message": "call dream.status to check state; allocate will only tag allocations during an active cycle"
+                })),
+            );
+        }
+    };
+
+    // Build the allocation request with dream_cycle_id auto-filled
+    let mut alloc_params = params.clone();
+    if alloc_params.is_object() {
+        alloc_params["dream_cycle_id"] = json!(cycle_id);
+    }
+
+    // Delegate to the standard resources.allocate handler
+    crate::api_broker::handle_resources_allocate(&id, Some(alloc_params), state).await
 }
 
 /// Handle `guard.approvals_list` — list all pending approvals.
